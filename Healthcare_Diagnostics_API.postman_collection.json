@@ -1,0 +1,3567 @@
+{
+  "info": {
+    "_postman_id": "d22d6516-9eff-4fdf-9644-40a14d56dc0c",
+    "name": "Healthcare Diagnostics Platform API (Flow-Wise)",
+    "description": "Comprehensive Postman Collection for the Healthcare Diagnostics Backend, including user registration with phone OTP, diagnostic test catalogue, partner slots, 30% advance / 70% balance payments, partner lifecycle, and admin metrics.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000",
+      "type": "string"
+    },
+    {
+      "key": "accessToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "refreshToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "bookingId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "partnerId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "testId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "packageId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "familyMemberId",
+      "value": "1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Flow 1 - Patient Registration, Authentication & Profile",
+      "description": "Step 1 to Step 3 of user journey: Phone OTP registration, login, JWT token management, profile, and family members.",
+      "item": [
+        {
+          "name": "1.1 Register - Send Phone OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/register/send-otp/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "register",
+                "send-otp"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"first_name\": \"Rahul\",\n  \"last_name\": \"Sharma\",\n  \"email\": \"rahul.sharma@example.com\",\n  \"role\": \"PATIENT\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/register/send-otp/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "register",
+                    "send-otp"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"first_name\": \"Rahul\",\n  \"last_name\": \"Sharma\",\n  \"email\": \"rahul.sharma@example.com\",\n  \"role\": \"PATIENT\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"OTP sent successfully to +919876543210.\",\n  \"phone_number\": \"+919876543210\",\n  \"otp_expiry_minutes\": 5,\n  \"debug_otp\": \"482910\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "1.2 Register - Verify OTP & Receive JWT Tokens",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/register/verify-otp/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "register",
+                "verify-otp"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"otp\": \"482910\",\n  \"first_name\": \"Rahul\",\n  \"last_name\": \"Sharma\",\n  \"email\": \"rahul.sharma@example.com\",\n  \"password\": \"SecurePassword123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/register/verify-otp/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "register",
+                    "verify-otp"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"otp\": \"482910\",\n  \"first_name\": \"Rahul\",\n  \"last_name\": \"Sharma\",\n  \"email\": \"rahul.sharma@example.com\",\n  \"password\": \"SecurePassword123!\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Account created successfully.\",\n  \"user\": {\n    \"id\": 1,\n    \"phone_number\": \"+919876543210\",\n    \"first_name\": \"Rahul\",\n    \"last_name\": \"Sharma\",\n    \"email\": \"rahul.sharma@example.com\",\n    \"date_of_birth\": null,\n    \"age\": null,\n    \"gender\": null,\n    \"city\": \"\",\n    \"address\": \"\",\n    \"pincode\": \"\",\n    \"role\": \"PATIENT\",\n    \"is_phone_verified\": true\n  },\n  \"tokens\": {\n    \"refresh\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n    \"access\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n  }\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.tokens && res.tokens.access) {",
+                  "    pm.collectionVariables.set('accessToken', res.tokens.access);",
+                  "    pm.collectionVariables.set('refreshToken', res.tokens.refresh);",
+                  "    console.log('Saved JWT tokens to collection variables.');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.3 Register - Resend OTP (with Cooldown Guard)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/register/resend-otp/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "register",
+                "resend-otp"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+919876543210\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/register/resend-otp/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "register",
+                    "resend-otp"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone_number\": \"+919876543210\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"A new OTP has been sent to +919876543210.\",\n  \"phone_number\": \"+919876543210\",\n  \"otp_expiry_minutes\": 5,\n  \"debug_otp\": \"617283\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "1.4 Login - Send OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/login/send-otp/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "login",
+                "send-otp"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+919876543210\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/login/send-otp/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "login",
+                    "send-otp"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone_number\": \"+919876543210\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Login OTP sent successfully to +919876543210.\",\n  \"phone_number\": \"+919876543210\",\n  \"otp_expiry_minutes\": 5,\n  \"debug_otp\": \"839102\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "1.5 Login - Verify OTP (Issues JWT Tokens)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/login/verify-otp/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "login",
+                "verify-otp"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"otp\": \"839102\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/login/verify-otp/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "login",
+                    "verify-otp"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"otp\": \"839102\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Login successful.\",\n  \"user\": {\n    \"id\": 1,\n    \"phone_number\": \"+919876543210\",\n    \"first_name\": \"Rahul\",\n    \"last_name\": \"Sharma\",\n    \"email\": \"rahul.sharma@example.com\",\n    \"role\": \"PATIENT\"\n  },\n  \"tokens\": {\n    \"refresh\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n    \"access\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n  }\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.tokens && res.tokens.access) {",
+                  "    pm.collectionVariables.set('accessToken', res.tokens.access);",
+                  "    pm.collectionVariables.set('refreshToken', res.tokens.refresh);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.6 Login - Password Authentication (Alternative)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/login/password/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "login",
+                "password"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"password\": \"SecurePassword123!\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/login/password/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "login",
+                    "password"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"phone_number\": \"+919876543210\",\n  \"password\": \"SecurePassword123!\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Login successful.\",\n  \"tokens\": {\n    \"refresh\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\",\n    \"access\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n  }\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.tokens && res.tokens.access) {",
+                  "    pm.collectionVariables.set('accessToken', res.tokens.access);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.7 JWT - Refresh Access Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/token/refresh/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "token",
+                "refresh"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refreshToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/token/refresh/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "token",
+                    "refresh"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refresh\": \"{{refreshToken}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"access\": \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.access) {",
+                  "    pm.collectionVariables.set('accessToken', res.access);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.8 JWT - Verify Access Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/token/verify/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "token",
+                "verify"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{accessToken}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "1.9 Profile - Get Current User Profile",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/profile/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "profile"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/profile/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "profile"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"user\": {\n    \"id\": 1,\n    \"phone_number\": \"+919876543210\",\n    \"first_name\": \"Rahul\",\n    \"last_name\": \"Sharma\",\n    \"email\": \"rahul.sharma@example.com\",\n    \"date_of_birth\": \"1992-05-14\",\n    \"age\": 34,\n    \"gender\": \"MALE\",\n    \"city\": \"Hyderabad\",\n    \"address\": \"Flat 302, Green Meadows, Madhapur\",\n    \"pincode\": \"500081\",\n    \"role\": \"PATIENT\",\n    \"is_phone_verified\": true\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "1.10 Profile - Update Basic Profile",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/profile/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "profile"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Rahul\",\n  \"last_name\": \"Sharma\",\n  \"date_of_birth\": \"1992-05-14\",\n  \"gender\": \"MALE\",\n  \"city\": \"Hyderabad\",\n  \"address\": \"Flat 302, Green Meadows, Madhapur\",\n  \"pincode\": \"500081\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/profile/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "profile"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"first_name\": \"Rahul\",\n  \"last_name\": \"Sharma\",\n  \"date_of_birth\": \"1992-05-14\",\n  \"gender\": \"MALE\",\n  \"city\": \"Hyderabad\",\n  \"address\": \"Flat 302, Green Meadows, Madhapur\",\n  \"pincode\": \"500081\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Profile updated successfully.\",\n  \"user\": {\n    \"id\": 1,\n    \"first_name\": \"Rahul\",\n    \"last_name\": \"Sharma\",\n    \"date_of_birth\": \"1992-05-14\",\n    \"age\": 34,\n    \"gender\": \"MALE\",\n    \"city\": \"Hyderabad\",\n    \"address\": \"Flat 302, Green Meadows, Madhapur\",\n    \"pincode\": \"500081\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "1.11 Family Profiles - List Family Members",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/family-members/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "family-members"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/family-members/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "family-members"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"id\": 1,\n    \"name\": \"Sunita Sharma\",\n    \"relationship\": \"SPOUSE\",\n    \"gender\": \"FEMALE\",\n    \"date_of_birth\": \"1994-08-20\",\n    \"age\": 32,\n    \"phone_number\": \"+919876500000\",\n    \"email\": \"sunita@example.com\"\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "1.12 Family Profiles - Add Family Member",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/family-members/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "family-members"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Sunita Sharma\",\n  \"relationship\": \"SPOUSE\",\n  \"gender\": \"FEMALE\",\n  \"date_of_birth\": \"1994-08-20\",\n  \"phone_number\": \"+919876500000\",\n  \"email\": \"sunita@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/family-members/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "family-members"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Sunita Sharma\",\n  \"relationship\": \"SPOUSE\",\n  \"gender\": \"FEMALE\",\n  \"date_of_birth\": \"1994-08-20\",\n  \"phone_number\": \"+919876500000\",\n  \"email\": \"sunita@example.com\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Family member added successfully.\",\n  \"family_member\": {\n    \"id\": 1,\n    \"name\": \"Sunita Sharma\",\n    \"relationship\": \"SPOUSE\",\n    \"gender\": \"FEMALE\",\n    \"date_of_birth\": \"1994-08-20\",\n    \"age\": 32,\n    \"phone_number\": \"+919876500000\"\n  }\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.family_member && res.family_member.id) {",
+                  "    pm.collectionVariables.set('familyMemberId', res.family_member.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "1.13 Family Profiles - Update Family Member",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/family-members/{{familyMemberId}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "family-members",
+                "{{familyMemberId}}"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Sunita Sharma\",\n  \"relationship\": \"SPOUSE\",\n  \"gender\": \"FEMALE\",\n  \"date_of_birth\": \"1994-08-20\",\n  \"phone_number\": \"+919876500000\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/family-members/{{familyMemberId}}/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "family-members",
+                    "{{familyMemberId}}"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Sunita Sharma\",\n  \"relationship\": \"SPOUSE\",\n  \"gender\": \"FEMALE\",\n  \"date_of_birth\": \"1994-08-20\",\n  \"phone_number\": \"+919876500000\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Family member updated successfully.\",\n  \"family_member\": {\n    \"id\": 1,\n    \"name\": \"Sunita Sharma\",\n    \"relationship\": \"SPOUSE\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "1.14 Logout - Invalidate Session",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/logout/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "logout"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/logout/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "logout"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Logged out successfully.\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Flow 2 - Diagnostics Catalogue & Health Packages",
+      "description": "Step 4 of user journey: Explore categories, browse tests, review preparation instructions, and health packages.",
+      "item": [
+        {
+          "name": "2.1 Categories - List All",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/categories/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "categories"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/categories/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "categories"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"count\": 2,\n  \"categories\": [\n    {\n      \"id\": 1,\n      \"name\": \"Pathology / Blood\",\n      \"slug\": \"pathology-blood\",\n      \"description\": \"Routine blood tests\",\n      \"tests_count\": 8\n    },\n    {\n      \"id\": 2,\n      \"name\": \"Diabetes Care\",\n      \"slug\": \"diabetes-care\",\n      \"description\": \"Blood glucose and HbA1c\",\n      \"tests_count\": 3\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "2.2 Categories - Create New Category (Admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/categories/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "categories"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Cardiac & Lipid Care\",\n  \"description\": \"Heart risk profile tests\",\n  \"icon\": \"heart\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/categories/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "categories"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Cardiac & Lipid Care\",\n  \"description\": \"Heart risk profile tests\",\n  \"icon\": \"heart\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Category 'Cardiac & Lipid Care' created successfully.\",\n  \"category\": {\n    \"id\": 3,\n    \"name\": \"Cardiac & Lipid Care\",\n    \"slug\": \"cardiac-lipid-care\",\n    \"description\": \"Heart risk profile tests\",\n    \"icon\": \"heart\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "2.3 Tests - Browse & Search Tests",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tests/?search=glucose&fasting=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tests"
+              ],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "glucose"
+                },
+                {
+                  "key": "fasting",
+                  "value": "true"
+                }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/tests/?search=glucose&fasting=true",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "tests"
+                  ],
+                  "query": [
+                    {
+                      "key": "search",
+                      "value": "glucose"
+                    },
+                    {
+                      "key": "fasting",
+                      "value": "true"
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"count\": 1,\n  \"tests\": [\n    {\n      \"id\": 1,\n      \"name\": \"Fasting Blood Glucose\",\n      \"code\": \"FBG-01\",\n      \"category\": 1,\n      \"category_name\": \"Diabetes Care\",\n      \"sample_type\": \"BLOOD\",\n      \"fasting_required\": true,\n      \"fasting_duration_hours\": 8,\n      \"turnaround_time_hours\": 6,\n      \"preparation_instructions\": \"Fast for 8 to 10 hours prior to sample collection.\",\n      \"base_price\": \"120.00\",\n      \"is_available\": true\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "2.4 Tests - Create Diagnostic Test (Admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tests/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tests"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Complete Blood Count (CBC)\",\n  \"code\": \"CBC-01\",\n  \"category\": 1,\n  \"description\": \"Evaluates overall health and detects anemia, infection, and leukemia.\",\n  \"sample_type\": \"BLOOD\",\n  \"fasting_required\": false,\n  \"fasting_duration_hours\": 0,\n  \"turnaround_time_hours\": 8,\n  \"preparation_instructions\": \"No special fasting required.\",\n  \"base_price\": \"299.00\",\n  \"is_available\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/tests/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "tests"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Complete Blood Count (CBC)\",\n  \"code\": \"CBC-01\",\n  \"category\": 1,\n  \"description\": \"Evaluates overall health and detects anemia, infection, and leukemia.\",\n  \"sample_type\": \"BLOOD\",\n  \"fasting_required\": false,\n  \"fasting_duration_hours\": 0,\n  \"turnaround_time_hours\": 8,\n  \"preparation_instructions\": \"No special fasting required.\",\n  \"base_price\": \"299.00\",\n  \"is_available\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Diagnostic test 'Complete Blood Count (CBC)' created successfully.\",\n  \"test\": {\n    \"id\": 2,\n    \"name\": \"Complete Blood Count (CBC)\",\n    \"code\": \"CBC-01\",\n    \"base_price\": \"299.00\"\n  }\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.test && res.test.id) {",
+                  "    pm.collectionVariables.set('testId', res.test.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.5 Tests - Get Test Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tests/{{testId}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tests",
+                "{{testId}}"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/tests/{{testId}}/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "tests",
+                    "{{testId}}"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"test\": {\n    \"id\": 1,\n    \"name\": \"Complete Blood Count (CBC)\",\n    \"code\": \"CBC-01\",\n    \"category_name\": \"Pathology / Blood\",\n    \"sample_type\": \"BLOOD\",\n    \"fasting_required\": false,\n    \"preparation_instructions\": \"No special preparation needed.\",\n    \"base_price\": \"299.00\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "2.6 Packages - List Health Packages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/packages/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "packages"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/packages/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "packages"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"count\": 1,\n  \"packages\": [\n    {\n      \"id\": 1,\n      \"name\": \"Comprehensive Full Body Checkup\",\n      \"code\": \"PKG-FULL-01\",\n      \"price\": \"1499.00\",\n      \"market_price\": \"2200.00\",\n      \"discount_percentage\": 32,\n      \"tests_count\": 5,\n      \"tests\": [\n        {\n          \"id\": 1,\n          \"name\": \"Fasting Blood Glucose\",\n          \"base_price\": \"120.00\"\n        },\n        {\n          \"id\": 2,\n          \"name\": \"Complete Blood Count (CBC)\",\n          \"base_price\": \"299.00\"\n        }\n      ]\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "2.7 Packages - Create Health Package (Admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/packages/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "packages"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Diabetes Screening Package\",\n  \"code\": \"PKG-DIAB-01\",\n  \"description\": \"Essential tests for diabetic patients\",\n  \"price\": \"899.00\",\n  \"market_price\": \"1120.00\",\n  \"preparation_instructions\": \"Fast for 8 to 10 hours overnight.\",\n  \"test_ids\": [\n    1,\n    2\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/packages/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "packages"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Diabetes Screening Package\",\n  \"code\": \"PKG-DIAB-01\",\n  \"description\": \"Essential tests for diabetic patients\",\n  \"price\": \"899.00\",\n  \"market_price\": \"1120.00\",\n  \"preparation_instructions\": \"Fast for 8 to 10 hours overnight.\",\n  \"test_ids\": [\n    1,\n    2\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Health package 'Diabetes Screening Package' created successfully.\",\n  \"package\": {\n    \"id\": 2,\n    \"name\": \"Diabetes Screening Package\",\n    \"price\": \"899.00\",\n    \"tests_count\": 2\n  }\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.package && res.package.id) {",
+                  "    pm.collectionVariables.set('packageId', res.package.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "2.8 Packages - Get Package Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/packages/{{packageId}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "packages",
+                "{{packageId}}"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/packages/{{packageId}}/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "packages",
+                    "{{packageId}}"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"package\": {\n    \"id\": 1,\n    \"name\": \"Comprehensive Full Body Checkup\",\n    \"price\": \"1499.00\",\n    \"tests_count\": 5\n  }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Flow 3 - Diagnostic Partner Discovery & Availability",
+      "description": "Steps 5 to 7: Select partner centre, verify pincode serviceability, and inspect available date & time slots.",
+      "item": [
+        {
+          "name": "3.1 Partners - Browse Centres (City & Service Filter)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partners/?city=Hyderabad&home_collection=true",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partners"
+              ],
+              "query": [
+                {
+                  "key": "city",
+                  "value": "Hyderabad"
+                },
+                {
+                  "key": "home_collection",
+                  "value": "true"
+                }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partners/?city=Hyderabad&home_collection=true",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partners"
+                  ],
+                  "query": [
+                    {
+                      "key": "city",
+                      "value": "Hyderabad"
+                    },
+                    {
+                      "key": "home_collection",
+                      "value": "true"
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"id\": 1,\n    \"centre_name\": \"Apollo Diagnostics Madhapur\",\n    \"city\": \"Hyderabad\",\n    \"address\": \"Plot 42, Hitech City Main Road\",\n    \"pincode\": \"500081\",\n    \"phone_number\": \"+914012345678\",\n    \"rating\": \"4.8\",\n    \"offers_home_collection\": true,\n    \"offers_centre_visit\": true,\n    \"home_collection_charge\": \"50.00\"\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "3.2 Partners - Get Partner Details & Custom Prices",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partners/{{partnerId}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partners",
+                "{{partnerId}}"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partners/{{partnerId}}/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partners",
+                    "{{partnerId}}"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": 1,\n  \"centre_name\": \"Apollo Diagnostics Madhapur\",\n  \"city\": \"Hyderabad\",\n  \"offers_home_collection\": true,\n  \"test_pricings\": [\n    {\n      \"test_id\": 1,\n      \"test_name\": \"Complete Blood Count (CBC)\",\n      \"price\": \"270.00\",\n      \"is_available\": true\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "3.3 Serviceability - Check Home Collection Pincode",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partners/check-serviceability/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partners",
+                "check-serviceability"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pincode\": \"500081\",\n  \"city\": \"Hyderabad\",\n  \"partner_id\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partners/check-serviceability/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partners",
+                    "check-serviceability"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"pincode\": \"500081\",\n  \"city\": \"Hyderabad\",\n  \"partner_id\": 1\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"serviceable\": true,\n  \"partner_id\": 1,\n  \"partner_name\": \"Apollo Diagnostics Madhapur\",\n  \"pincode\": \"500081\",\n  \"city\": \"Hyderabad\",\n  \"home_collection_fee\": \"50.00\",\n  \"min_order_amount\": \"300.00\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "3.4 Slots - View Available Date & Time Slots",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partners/{{partnerId}}/slots/?date=2026-11-15&mode=HOME_COLLECTION",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partners",
+                "{{partnerId}}",
+                "slots"
+              ],
+              "query": [
+                {
+                  "key": "date",
+                  "value": "2026-11-15"
+                },
+                {
+                  "key": "mode",
+                  "value": "HOME_COLLECTION"
+                }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partners/{{partnerId}}/slots/?date=2026-11-15&mode=HOME_COLLECTION",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partners",
+                    "{{partnerId}}",
+                    "slots"
+                  ],
+                  "query": [
+                    {
+                      "key": "date",
+                      "value": "2026-11-15"
+                    },
+                    {
+                      "key": "mode",
+                      "value": "HOME_COLLECTION"
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"id\": 12,\n    \"slot_date\": \"2026-11-15\",\n    \"start_time\": \"07:30:00\",\n    \"end_time\": \"08:30:00\",\n    \"slot_type\": \"HOME_COLLECTION\",\n    \"available_capacity\": 5,\n    \"is_available\": true\n  },\n  {\n    \"id\": 13,\n    \"slot_date\": \"2026-11-15\",\n    \"start_time\": \"08:30:00\",\n    \"end_time\": \"09:30:00\",\n    \"slot_type\": \"HOME_COLLECTION\",\n    \"available_capacity\": 4,\n    \"is_available\": true\n  }\n]"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Flow 4 - Booking Review & 30% Advance Payment Flow",
+      "description": "Steps 8 to 9: Review 30%/70% breakdown, create booking, pay exactly 30% advance, and submit to partner.",
+      "item": [
+        {
+          "name": "4.1 Review - Price Estimate (30% Advance & 70% Balance)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/price-estimate/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "price-estimate"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"partner_id\": 1,\n  \"booking_mode\": \"HOME_COLLECTION\",\n  \"test_ids\": [\n    1\n  ],\n  \"package_ids\": [\n    1\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/bookings/price-estimate/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "bookings",
+                    "price-estimate"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"partner_id\": 1,\n  \"booking_mode\": \"HOME_COLLECTION\",\n  \"test_ids\": [\n    1\n  ],\n  \"package_ids\": [\n    1\n  ]\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"estimate\": {\n    \"items_total\": \"1619.00\",\n    \"home_collection_fee\": \"50.00\",\n    \"total_amount\": \"1669.00\",\n    \"advance_percentage\": \"30.00\",\n    \"advance_amount\": \"500.70\",\n    \"balance_amount\": \"1168.30\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "4.2 Booking - Create Booking Request",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"patient_type\": \"FAMILY_MEMBER\",\n  \"family_member_id\": 1,\n  \"partner_id\": 1,\n  \"booking_mode\": \"HOME_COLLECTION\",\n  \"appointment_date\": \"2026-11-15\",\n  \"slot_id\": 12,\n  \"appointment_time\": \"07:30:00\",\n  \"collection_address\": \"Flat 302, Green Meadows, Madhapur\",\n  \"collection_city\": \"Hyderabad\",\n  \"collection_pincode\": \"500081\",\n  \"contact_phone\": \"+919876543210\",\n  \"test_ids\": [\n    1\n  ],\n  \"package_ids\": [\n    1\n  ],\n  \"notes\": \"Patient is diabetic, needs morning collection.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/bookings/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "bookings"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"patient_type\": \"FAMILY_MEMBER\",\n  \"family_member_id\": 1,\n  \"partner_id\": 1,\n  \"booking_mode\": \"HOME_COLLECTION\",\n  \"appointment_date\": \"2026-11-15\",\n  \"slot_id\": 12,\n  \"appointment_time\": \"07:30:00\",\n  \"collection_address\": \"Flat 302, Green Meadows, Madhapur\",\n  \"collection_city\": \"Hyderabad\",\n  \"collection_pincode\": \"500081\",\n  \"contact_phone\": \"+919876543210\",\n  \"test_ids\": [\n    1\n  ],\n  \"package_ids\": [\n    1\n  ],\n  \"notes\": \"Patient is diabetic, needs morning collection.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Booking created. Please pay the 30% advance of \\u20b9500.70 to submit your request to the diagnostic partner.\",\n  \"booking\": {\n    \"id\": 1,\n    \"booking_code\": \"BK-20261110-8A7F1\",\n    \"booking_status\": \"PENDING_PAYMENT\",\n    \"payment_status\": \"UNPAID\",\n    \"patient_display_name\": \"Sunita Sharma\",\n    \"partner_name\": \"Apollo Diagnostics Madhapur\",\n    \"total_amount\": \"1669.00\",\n    \"advance_amount\": \"500.70\",\n    \"balance_amount\": \"1168.30\",\n    \"advance_paid\": \"0.00\",\n    \"balance_paid\": \"0.00\"\n  }\n}"
+            }
+          ],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var res = pm.response.json();",
+                  "if (res.booking && res.booking.id) {",
+                  "    pm.collectionVariables.set('bookingId', res.booking.id);",
+                  "    console.log('Saved bookingId to collection variable: ' + res.booking.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "4.3 Booking - Get Details & Outstanding Balance",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{bookingId}}"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "bookings",
+                    "{{bookingId}}"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": 1,\n  \"booking_code\": \"BK-20261110-8A7F1\",\n  \"booking_status\": \"PENDING_PAYMENT\",\n  \"payment_status\": \"UNPAID\",\n  \"total_amount\": \"1669.00\",\n  \"advance_amount\": \"500.70\",\n  \"balance_amount\": \"1168.30\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "4.4 Payment - Pay 30% Advance (Gateway Simulation)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/pay-advance/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{bookingId}}",
+                "pay-advance"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payment_mode\": \"UPI\",\n  \"transaction_id\": \"TXN_ADV_992817203\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/pay-advance/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "bookings",
+                    "{{bookingId}}",
+                    "pay-advance"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"payment_mode\": \"UPI\",\n  \"transaction_id\": \"TXN_ADV_992817203\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Advance payment of \\u20b9500.70 received. Booking is now awaiting partner confirmation.\",\n  \"booking\": {\n    \"id\": 1,\n    \"booking_code\": \"BK-20261110-8A7F1\",\n    \"booking_status\": \"AWAITING_PARTNER_CONFIRMATION\",\n    \"payment_status\": \"ADVANCE_PAID\",\n    \"total_amount\": \"1669.00\",\n    \"advance_paid\": \"500.70\",\n    \"balance_amount\": \"1168.30\"\n  },\n  \"payment\": {\n    \"id\": 1,\n    \"payment_type\": \"ADVANCE_30\",\n    \"amount\": \"500.70\",\n    \"payment_mode\": \"UPI\",\n    \"payment_status\": \"SUCCESS\",\n    \"transaction_id\": \"TXN_ADV_992817203\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "4.5 Booking - Cancel Booking (User-Initiated)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/cancel/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{bookingId}}",
+                "cancel"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Change of schedule\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/cancel/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "bookings",
+                    "{{bookingId}}",
+                    "cancel"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"reason\": \"Change of schedule\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Booking cancelled successfully. Refund initiated.\",\n  \"booking_status\": \"CANCELLED\",\n  \"payment_status\": \"REFUNDED\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Flow 5 - Diagnostic Partner Dashboard & Lifecycle",
+      "description": "Steps 10 to 11: Partner receives incoming bookings, accepts/rejects with auto-refund, and updates service lifecycle.",
+      "item": [
+        {
+          "name": "5.1 Partner - Dashboard Summary & KPIs",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partner/dashboard/summary/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partner",
+                "dashboard",
+                "summary"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partner/dashboard/summary/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partner",
+                    "dashboard",
+                    "summary"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"partner_name\": \"Apollo Diagnostics Madhapur\",\n  \"metrics\": {\n    \"pending_confirmation_count\": 1,\n    \"confirmed_count\": 5,\n    \"sample_collection_count\": 3,\n    \"completed_count\": 28,\n    \"total_advance_collected\": \"14500.00\",\n    \"outstanding_balance\": \"4200.00\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "5.2 Partner - Incoming Booking Requests",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partner/bookings/?status=AWAITING_PARTNER_CONFIRMATION",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partner",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "AWAITING_PARTNER_CONFIRMATION"
+                }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partner/bookings/?status=AWAITING_PARTNER_CONFIRMATION",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partner",
+                    "bookings"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "AWAITING_PARTNER_CONFIRMATION"
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"id\": 1,\n    \"booking_code\": \"BK-20261110-8A7F1\",\n    \"patient_name\": \"Sunita Sharma\",\n    \"contact_phone\": \"+919876543210\",\n    \"booking_mode\": \"HOME_COLLECTION\",\n    \"appointment_date\": \"2026-11-15\",\n    \"appointment_time\": \"07:30:00\",\n    \"booking_status\": \"AWAITING_PARTNER_CONFIRMATION\",\n    \"payment_status\": \"ADVANCE_PAID\",\n    \"advance_paid\": \"500.70\"\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "5.3 Partner - Accept Booking (Confirmed)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/accept/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partner",
+                "bookings",
+                "{{bookingId}}",
+                "accept"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/accept/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partner",
+                    "bookings",
+                    "{{bookingId}}",
+                    "accept"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Booking BK-20261110-8A7F1 has been accepted and confirmed.\",\n  \"booking\": {\n    \"id\": 1,\n    \"booking_status\": \"CONFIRMED\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "5.4 Partner - Update Status to Sample Collection Visit",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/update-status/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partner",
+                "bookings",
+                "{{bookingId}}",
+                "update-status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"SAMPLE_COLLECTION\",\n  \"notes\": \"Phlebotomist Rajesh has been dispatched to collection address.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/update-status/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partner",
+                    "bookings",
+                    "{{bookingId}}",
+                    "update-status"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"SAMPLE_COLLECTION\",\n  \"notes\": \"Phlebotomist Rajesh has been dispatched to collection address.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Booking status updated to SAMPLE_COLLECTION.\",\n  \"booking\": {\n    \"id\": 1,\n    \"booking_status\": \"SAMPLE_COLLECTION\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "5.5 Partner - Mark Service Completed (Triggers 70% Alert)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/update-status/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partner",
+                "bookings",
+                "{{bookingId}}",
+                "update-status"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"TEST_COMPLETED\",\n  \"notes\": \"Sample received and laboratory processing completed.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/update-status/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partner",
+                    "bookings",
+                    "{{bookingId}}",
+                    "update-status"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"TEST_COMPLETED\",\n  \"notes\": \"Sample received and laboratory processing completed.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Booking status updated to TEST_COMPLETED. Patient notified to pay remaining balance.\",\n  \"booking\": {\n    \"id\": 1,\n    \"booking_status\": \"TEST_COMPLETED\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "5.6 Partner - Reject Booking (Auto-Refunding Advance)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/reject/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partner",
+                "bookings",
+                "{{bookingId}}",
+                "reject"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"rejection_reason\": \"No phlebotomist available for requested area at this slot.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/reject/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partner",
+                    "bookings",
+                    "{{bookingId}}",
+                    "reject"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"rejection_reason\": \"No phlebotomist available for requested area at this slot.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Booking rejected. 30% advance payment refund initiated.\",\n  \"booking\": {\n    \"id\": 1,\n    \"booking_status\": \"CANCELLED\",\n    \"payment_status\": \"REFUNDED\",\n    \"cancellation_reason\": \"No phlebotomist available for requested area at this slot.\"\n  }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Flow 6 - 70% Balance Settlement & Final Receipt",
+      "description": "Step 12: Collect remaining 70% via Online Payment Gateway OR Partner Offline POS/Cash Recording.",
+      "item": [
+        {
+          "name": "6.1 Online Settlement - Patient Pays Remaining 70% Balance",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/pay-balance/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{bookingId}}",
+                "pay-balance"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"payment_mode\": \"CREDIT_CARD\",\n  \"transaction_id\": \"TXN_BAL_771829103\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/pay-balance/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "bookings",
+                    "{{bookingId}}",
+                    "pay-balance"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"payment_mode\": \"CREDIT_CARD\",\n  \"transaction_id\": \"TXN_BAL_771829103\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Final balance payment of \\u20b91168.30 received. Booking is fully paid.\",\n  \"booking\": {\n    \"id\": 1,\n    \"booking_code\": \"BK-20261110-8A7F1\",\n    \"booking_status\": \"TEST_COMPLETED\",\n    \"payment_status\": \"FULLY_PAID\",\n    \"total_amount\": \"1669.00\",\n    \"advance_paid\": \"500.70\",\n    \"balance_paid\": \"1168.30\",\n    \"balance_amount\": \"0.00\"\n  },\n  \"payment\": {\n    \"id\": 2,\n    \"payment_type\": \"BALANCE_70\",\n    \"amount\": \"1168.30\",\n    \"payment_mode\": \"CREDIT_CARD\",\n    \"payment_status\": \"SUCCESS\",\n    \"transaction_id\": \"TXN_BAL_771829103\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "6.2 Offline Settlement - Partner Records Cash / POS Collection",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/record-balance/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "partner",
+                "bookings",
+                "{{bookingId}}",
+                "record-balance"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": \"1168.30\",\n  \"payment_mode\": \"CASH\",\n  \"transaction_reference\": \"POS-REC-994821\",\n  \"notes\": \"Collected cash at centre counter.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/partner/bookings/{{bookingId}}/record-balance/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "partner",
+                    "bookings",
+                    "{{bookingId}}",
+                    "record-balance"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"amount\": \"1168.30\",\n  \"payment_mode\": \"CASH\",\n  \"transaction_reference\": \"POS-REC-994821\",\n  \"notes\": \"Collected cash at centre counter.\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Offline balance payment of \\u20b91168.30 recorded successfully.\",\n  \"booking\": {\n    \"id\": 1,\n    \"payment_status\": \"FULLY_PAID\",\n    \"balance_paid\": \"1168.30\",\n    \"balance_amount\": \"0.00\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "6.3 Final Summary - Booking & Payment Receipt",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "bookings",
+                "{{bookingId}}"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/bookings/{{bookingId}}/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "bookings",
+                    "{{bookingId}}"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"id\": 1,\n  \"booking_code\": \"BK-20261110-8A7F1\",\n  \"booking_status\": \"TEST_COMPLETED\",\n  \"payment_status\": \"FULLY_PAID\",\n  \"total_amount\": \"1669.00\",\n  \"advance_paid\": \"500.70\",\n  \"balance_paid\": \"1168.30\",\n  \"balance_amount\": \"0.00\",\n  \"payments\": [\n    {\n      \"payment_type\": \"ADVANCE_30\",\n      \"amount\": \"500.70\",\n      \"payment_mode\": \"UPI\",\n      \"transaction_id\": \"TXN_ADV_992817203\"\n    },\n    {\n      \"payment_type\": \"BALANCE_70\",\n      \"amount\": \"1168.30\",\n      \"payment_mode\": \"CREDIT_CARD\",\n      \"transaction_id\": \"TXN_BAL_771829103\"\n    }\n  ]\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Flow 7 - Notifications & Admin Monitoring",
+      "description": "Patient notifications and administrative KPIs, booking supervision, and partner approvals.",
+      "item": [
+        {
+          "name": "7.1 Notifications - View Patient Notifications",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/notifications/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "notifications"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/notifications/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "notifications"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"id\": 1,\n    \"title\": \"Advance Payment Received\",\n    \"message\": \"Your booking BK-20261110-8A7F1 is awaiting partner confirmation.\",\n    \"notification_type\": \"PAYMENT_SUCCESS\",\n    \"is_read\": false,\n    \"created_at\": \"2026-11-10T12:00:00Z\"\n  },\n  {\n    \"id\": 2,\n    \"title\": \"Booking Confirmed\",\n    \"message\": \"Apollo Diagnostics Madhapur has confirmed your appointment.\",\n    \"notification_type\": \"BOOKING_CONFIRMED\",\n    \"is_read\": false,\n    \"created_at\": \"2026-11-10T12:05:00Z\"\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "7.2 Notifications - Mark Read",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/notifications/1/mark-read/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "notifications",
+                "1",
+                "mark-read"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/notifications/1/mark-read/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "notifications",
+                    "1",
+                    "mark-read"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Notification marked as read.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "7.3 Admin - System Dashboard Metrics & Revenue",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/dashboard/metrics/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "dashboard",
+                "metrics"
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/admin/dashboard/metrics/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "dashboard",
+                    "metrics"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"total_users\": 154,\n  \"total_partners\": 12,\n  \"active_partners\": 10,\n  \"total_bookings\": 320,\n  \"total_booking_value\": \"450200.00\",\n  \"advance_collected\": \"135060.00\",\n  \"balance_outstanding\": \"315140.00\",\n  \"pending_partner_approvals\": 2\n}"
+            }
+          ]
+        },
+        {
+          "name": "7.4 Admin - Monitor All Platform Bookings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/bookings/?status=CONFIRMED",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "CONFIRMED"
+                }
+              ]
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/admin/bookings/?status=CONFIRMED",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "bookings"
+                  ],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "CONFIRMED"
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "[\n  {\n    \"id\": 1,\n    \"booking_code\": \"BK-20261110-8A7F1\",\n    \"user_phone\": \"+919876543210\",\n    \"patient_name\": \"Sunita Sharma\",\n    \"partner_name\": \"Apollo Diagnostics Madhapur\",\n    \"booking_status\": \"CONFIRMED\",\n    \"payment_status\": \"ADVANCE_PAID\",\n    \"total_amount\": \"1669.00\",\n    \"advance_amount\": \"500.70\",\n    \"balance_amount\": \"1168.30\"\n  }\n]"
+            }
+          ]
+        },
+        {
+          "name": "7.5 Admin - Approve / Activate Diagnostic Partner",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{accessToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/admin/partners/{{partnerId}}/approve/",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "partners",
+                "{{partnerId}}",
+                "approve"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"is_verified\": true,\n  \"is_active\": true\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{accessToken}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/api/admin/partners/{{partnerId}}/approve/",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "partners",
+                    "{{partnerId}}",
+                    "approve"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"is_verified\": true,\n  \"is_active\": true\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Partner onboarding status updated.\",\n  \"partner\": {\n    \"id\": 1,\n    \"centre_name\": \"Apollo Diagnostics Madhapur\",\n    \"is_verified\": true,\n    \"is_active\": true\n  }\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
