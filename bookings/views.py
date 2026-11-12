@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from django.utils import timezone
 from django.db.models import Sum, Count, Q
+import uuid
 from decimal import Decimal
 
 from .models import Booking, BookingItem, Payment, Notification
@@ -494,9 +495,13 @@ class AdminDashboardMetricsView(APIView):
     permission_classes = [IsAdminUser]
 
     def get(self, request, *args, **kwargs):
-        from accounts.models import User
+        from accounts.models import User, FamilyMember
+        from diagnostics.models import DiagnosticTest, HealthPackage
 
         total_users = User.objects.count()
+        total_family = FamilyMember.objects.count()
+        total_tests = DiagnosticTest.objects.count()
+        total_packages = HealthPackage.objects.count()
         total_partners = DiagnosticPartner.objects.count()
         active_partners = DiagnosticPartner.objects.filter(status='ACTIVE').count()
 
@@ -520,18 +525,40 @@ class AdminDashboardMetricsView(APIView):
 
         # Status breakdowns
         status_counts = dict(bookings_qs.values('booking_status').annotate(count=Count('id')).values_list('booking_status', 'count'))
+        pending_count = status_counts.get('PENDING', 0)
+        confirmed_count = status_counts.get('CONFIRMED', 0)
+        completed_count = status_counts.get('COMPLETED', 0)
+        cancelled_count = status_counts.get('CANCELLED', 0)
 
         return Response(
             {
                 "success": True,
+                # Direct top-level fields matching the 8 Dashboard Cards in 1MinDoc Admin UI
+                "registered_users": total_users,
+                "family_members": total_family,
+                "diagnostic_tests": total_tests,
+                "total_bookings": total_bookings,
+                "pending": pending_count,
+                "confirmed": confirmed_count,
+                "completed": completed_count,
+                "cancelled": cancelled_count,
+                "packages": total_packages,
+                # Full structured metrics object
                 "metrics": {
                     "registered_users": total_users,
+                    "family_members": total_family,
+                    "diagnostic_tests": total_tests,
+                    "packages": total_packages,
                     "diagnostic_partners": {
                         "total": total_partners,
                         "active": active_partners,
                     },
                     "bookings": {
                         "total_count": total_bookings,
+                        "pending": pending_count,
+                        "confirmed": confirmed_count,
+                        "completed": completed_count,
+                        "cancelled": cancelled_count,
                         "status_breakdown": status_counts,
                     },
                     "financials": {

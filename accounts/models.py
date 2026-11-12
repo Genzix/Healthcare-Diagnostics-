@@ -1,4 +1,6 @@
 import secrets
+from datetime import timedelta
+from django.conf import settings
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.utils import timezone
@@ -214,3 +216,376 @@ class PhoneOTP(models.Model):
     def generate_otp_code(length=6):
         """Generates a cryptographically secure numeric OTP."""
         return ''.join(str(secrets.randbelow(10)) for _ in range(length))
+
+
+# ============================================================================
+# Health Card Models (zero migrations required, managed = False)
+# ============================================================================
+
+class HealthCardProfile(models.Model):
+    BLOOD_GROUP_CHOICES = (
+        ('A+', 'A+'), ('A-', 'A-'),
+        ('B+', 'B+'), ('B-', 'B-'),
+        ('AB+', 'AB+'), ('AB-', 'AB-'),
+        ('O+', 'O+'), ('O-', 'O-'),
+    )
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='health_card_profile'
+    )
+
+    # 1. Basic Health Profile
+    blood_group = models.CharField(max_length=5, choices=BLOOD_GROUP_CHOICES, blank=True, null=True)
+    emergency_contact_name = models.CharField(max_length=150, blank=True, default='')
+    emergency_contact_phone = models.CharField(max_length=20, blank=True, default='')
+
+    # 2. Body Metrics
+    height_cm = models.FloatField(blank=True, null=True, help_text="Height in centimeters")
+    weight_kg = models.FloatField(blank=True, null=True, help_text="Weight in kilograms")
+
+    # 3. Vitals
+    bp_systolic = models.IntegerField(blank=True, null=True, help_text="Systolic Blood Pressure (mmHg)")
+    bp_diastolic = models.IntegerField(blank=True, null=True, help_text="Diastolic Blood Pressure (mmHg)")
+    heart_rate = models.IntegerField(blank=True, null=True, help_text="Heart Rate / Pulse (BPM)")
+    spo2 = models.IntegerField(blank=True, null=True, help_text="Blood Oxygen Saturation (%)")
+    temperature_f = models.FloatField(blank=True, null=True, help_text="Body Temperature (°F)")
+
+    # 4. Daily Activity
+    daily_steps = models.IntegerField(default=0, help_text="Current daily step count")
+    daily_water_ml = models.IntegerField(default=0, help_text="Current daily water intake (ml)")
+
+    # 5. Sleep Tracking
+    sleep_hours = models.FloatField(default=0.0, help_text="Last recorded sleep duration (hours)")
+    sleep_quality = models.CharField(max_length=20, default='GOOD', choices=[
+        ('DEEP', 'Deep Sleep'),
+        ('GOOD', 'Good Quality'),
+        ('FAIR', 'Fair Quality'),
+        ('RESTLESS', 'Restless / Poor')
+    ])
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        app_label = 'accounts'
+        db_table = 'accounts_healthcardprofile'
+
+    def __str__(self):
+        return f"HealthCardProfile for User {self.user_id}"
+
+    # --- Calculations ---
+    @property
+    def bmi(self):
+        """BMI = weight (kg) / [height (m)]^2"""
+        if self.height_cm and self.weight_kg and self.height_cm > 0:
+            height_m = self.height_cm / 100.0
+            return round(self.weight_kg / (height_m ** 2), 1)
+        return None
+
+    @property
+    def bmi_category(self):
+        val = self.bmi
+        if not val:
+            return "Needs height + weight"
+        if val < 18.5:
+            return "Underweight"
+        elif val <= 24.9:
+            return "Normal"
+        elif val <= 29.9:
+            return "Overweight"
+        else:
+            return "Obese"
+
+    @property
+    def bmr(self):
+        """Mifflin-St Jeor formula: 10*W + 6.25*H - 5*Age (+5 for men, -161 for women)"""
+        age = self.user.get_age()
+        if not (self.height_cm and self.weight_kg and age):
+            return None
+        base = (10 * self.weight_kg) + (6.25 * self.height_cm) - (5 * age)
+        gender = (self.user.gender or '').upper()
+        if gender == 'MALE':
+            return round(base + 5)
+        elif gender == 'FEMALE':
+            return round(base - 161)
+        return round(base - 78)
+
+    @property
+    def bp_display(self):
+        if self.bp_systolic and self.bp_diastolic:
+            return f"{self.bp_systolic}/{self.bp_diastolic} mmHg"
+        return "No data"
+
+    @property
+    def bp_status(self):
+        if not (self.bp_systolic and self.bp_diastolic):
+            return "No data"
+        sys, dia = self.bp_systolic, self.bp_diastolic
+        if sys < 120 and dia < 80:
+            return "Normal"
+        elif 120 <= sys <= 129 and dia < 80:
+            return "Elevated"
+        elif (130 <= sys <= 139) or (80 <= dia <= 89):
+            return "Hypertension Stage 1"
+        elif (140 <= sys <= 180) or (90 <= dia <= 120):
+            return "Hypertension Stage 2"
+        return "Hypertensive Crisis"
+
+    @property
+    def spo2_display(self):
+        if self.spo2 is not None:
+            return f"{self.spo2}%"
+        return "No data"
+
+    @property
+    def spo2_status(self):
+        if self.spo2 is None:
+            return "No data"
+        return "Normal" if self.spo2 >= 95 else "Low / Hypoxemia"
+
+    @property
+    def temperature_display(self):
+        if self.temperature_f is not None:
+            return f"{self.temperature_f} °F"
+        return "No data"
+
+
+class HealthMetricHistory(models.Model):
+    CATEGORY_CHOICES = (
+        ('BODY', 'Body Metrics'),
+        ('VITALS', 'Vitals'),
+        ('ACTIVITY', 'Daily Activity'),
+        ('SLEEP', 'Sleep Tracking'),
+    )
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='health_metric_history'
+    )
+    category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, db_index=True)
+    metric_name = models.CharField(max_length=50, db_index=True)
+    metric_value = models.FloatField()
+    secondary_value = models.FloatField(null=True, blank=True)
+    notes = models.CharField(max_length=255, blank=True, default='')
+    recorded_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        managed = False
+        app_label = 'accounts'
+        db_table = 'accounts_healthmetrichistory'
+        ordering = ['-recorded_at']
+
+    def __str__(self):
+        return f"{self.metric_name} = {self.metric_value} for User {self.user_id} at {self.recorded_at}"
+
+
+class HealthCardShare(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='health_card_shares'
+    )
+    share_token = models.CharField(max_length=64, unique=True, db_index=True)
+    expires_at = models.DateTimeField(db_index=True)
+    is_active = models.BooleanField(default=True)
+    duration_hours = models.IntegerField(default=24)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        managed = False
+        app_label = 'accounts'
+        db_table = 'accounts_healthcardshare'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Share token {self.share_token[:8]}... for User {self.user_id} (Expires: {self.expires_at})"
+
+    def is_valid(self):
+        return self.is_active and timezone.now() < self.expires_at
+
+    @classmethod
+    def create_share_link(cls, user, duration_hours=24):
+        token = secrets.token_urlsafe(24)
+        expires_at = timezone.now() + timedelta(hours=duration_hours)
+        return cls.objects.create(
+            user=user,
+            share_token=token,
+            expires_at=expires_at,
+            duration_hours=duration_hours,
+            is_active=True
+        )
+
+
+class SupportInquiry(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='support_inquiries'
+    )
+    name = models.CharField(max_length=150, blank=True)
+    phone = models.CharField(max_length=20, blank=True)
+    email = models.CharField(max_length=100, blank=True)
+    subject = models.CharField(max_length=200, default='General Inquiry')
+    message = models.TextField()
+    status = models.CharField(max_length=20, default='OPEN')
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        managed = False
+        app_label = 'accounts'
+        db_table = 'accounts_supportinquiry'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Inquiry from {self.name or self.phone}: {self.subject}"
+
+
+def ensure_health_card_tables():
+    """
+    Safely creates health card tables if they don't already exist in the database,
+    requiring zero makemigrations and zero migrate commands.
+    """
+    from django.db import connection
+    vendor = connection.vendor
+    try:
+        with connection.cursor() as cursor:
+            if vendor == 'sqlite':
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_healthcardprofile (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER UNIQUE REFERENCES accounts_user(id) ON DELETE CASCADE,
+                    blood_group VARCHAR(5),
+                    emergency_contact_name VARCHAR(150) DEFAULT '',
+                    emergency_contact_phone VARCHAR(20) DEFAULT '',
+                    height_cm REAL,
+                    weight_kg REAL,
+                    bp_systolic INTEGER,
+                    bp_diastolic INTEGER,
+                    heart_rate INTEGER,
+                    spo2 INTEGER,
+                    temperature_f REAL,
+                    daily_steps INTEGER DEFAULT 0,
+                    daily_water_ml INTEGER DEFAULT 0,
+                    sleep_hours REAL DEFAULT 0,
+                    sleep_quality VARCHAR(20) DEFAULT 'GOOD',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_healthmetrichistory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER REFERENCES accounts_user(id) ON DELETE CASCADE,
+                    category VARCHAR(20),
+                    metric_name VARCHAR(50),
+                    metric_value REAL,
+                    secondary_value REAL,
+                    notes VARCHAR(255) DEFAULT '',
+                    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_healthcardshare (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER REFERENCES accounts_user(id) ON DELETE CASCADE,
+                    share_token VARCHAR(64) UNIQUE,
+                    expires_at TIMESTAMP,
+                    is_active BOOLEAN DEFAULT 1,
+                    duration_hours INTEGER DEFAULT 24,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+            else:
+                # PostgreSQL
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_healthcardprofile (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT UNIQUE REFERENCES accounts_user(id) ON DELETE CASCADE,
+                    blood_group VARCHAR(5),
+                    emergency_contact_name VARCHAR(150) DEFAULT '',
+                    emergency_contact_phone VARCHAR(20) DEFAULT '',
+                    height_cm DOUBLE PRECISION,
+                    weight_kg DOUBLE PRECISION,
+                    bp_systolic INTEGER,
+                    bp_diastolic INTEGER,
+                    heart_rate INTEGER,
+                    spo2 INTEGER,
+                    temperature_f DOUBLE PRECISION,
+                    daily_steps INTEGER DEFAULT 0,
+                    daily_water_ml INTEGER DEFAULT 0,
+                    sleep_hours DOUBLE PRECISION DEFAULT 0,
+                    sleep_quality VARCHAR(20) DEFAULT 'GOOD',
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_healthmetrichistory (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES accounts_user(id) ON DELETE CASCADE,
+                    category VARCHAR(20),
+                    metric_name VARCHAR(50),
+                    metric_value DOUBLE PRECISION,
+                    secondary_value DOUBLE PRECISION,
+                    notes VARCHAR(255) DEFAULT '',
+                    recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_healthcardshare (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT REFERENCES accounts_user(id) ON DELETE CASCADE,
+                    share_token VARCHAR(64) UNIQUE,
+                    expires_at TIMESTAMP WITH TIME ZONE,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    duration_hours INTEGER DEFAULT 24,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+    except Exception:
+        pass
+
+
+def ensure_support_tables():
+    """
+    Safely creates support inquiry table if it doesn't already exist in the database,
+    requiring zero makemigrations and zero migrate commands.
+    """
+    from django.db import connection
+    vendor = connection.vendor
+    try:
+        with connection.cursor() as cursor:
+            if vendor == 'sqlite':
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_supportinquiry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    name VARCHAR(150),
+                    phone VARCHAR(20),
+                    email VARCHAR(100),
+                    subject VARCHAR(200),
+                    message TEXT,
+                    status VARCHAR(20) DEFAULT 'OPEN',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+            else:
+                cursor.execute('''
+                CREATE TABLE IF NOT EXISTS accounts_supportinquiry (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT,
+                    name VARCHAR(150),
+                    phone VARCHAR(20),
+                    email VARCHAR(100),
+                    subject VARCHAR(200),
+                    message TEXT,
+                    status VARCHAR(20) DEFAULT 'OPEN',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                ''')
+    except Exception:
+        pass
+

@@ -12,6 +12,10 @@ class CategorySerializer(serializers.ModelSerializer):
 
 class DiagnosticTestSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='category.name', read_only=True)
+    price = serializers.DecimalField(source='base_price', max_digits=10, decimal_places=2, read_only=True)
+    mrp = serializers.SerializerMethodField()
+    discount = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
 
     class Meta:
         model = DiagnosticTest
@@ -28,10 +32,24 @@ class DiagnosticTestSerializer(serializers.ModelSerializer):
             'turnaround_time_hours',
             'preparation_instructions',
             'base_price',
+            'price',
+            'mrp',
+            'discount',
+            'status',
             'is_available',
             'created_at',
             'updated_at',
         ]
+
+    def get_mrp(self, obj):
+        base = float(obj.base_price) if obj.base_price else 0.0
+        return round(base * 1.5, 2)
+
+    def get_discount(self, obj):
+        return "33.33%"
+
+    def get_status(self, obj):
+        return "Active" if obj.is_available else "Inactive"
 
 
 class DiagnosticTestSimpleSerializer(serializers.ModelSerializer):
@@ -44,6 +62,9 @@ class HealthPackageSerializer(serializers.ModelSerializer):
     tests = DiagnosticTestSimpleSerializer(many=True, read_only=True)
     tests_count = serializers.IntegerField(source='total_tests_count', read_only=True)
     discount_percentage = serializers.IntegerField(source='calculate_discount_percentage', read_only=True)
+    mrp = serializers.DecimalField(source='market_price', max_digits=10, decimal_places=2, read_only=True)
+    discount = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
 
     class Meta:
         model = HealthPackage
@@ -54,7 +75,10 @@ class HealthPackageSerializer(serializers.ModelSerializer):
             'description',
             'price',
             'market_price',
+            'mrp',
+            'discount',
             'discount_percentage',
+            'status',
             'tests_count',
             'tests',
             'preparation_instructions',
@@ -64,4 +88,11 @@ class HealthPackageSerializer(serializers.ModelSerializer):
             'created_at',
             'updated_at',
         ]
+
+    def get_discount(self, obj):
+        pct = obj.calculate_discount_percentage()
+        return f"{pct}%" if pct else "0%"
+
+    def get_status(self, obj):
+        return "Active" if obj.is_available else "Inactive"
 
