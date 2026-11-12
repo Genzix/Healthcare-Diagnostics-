@@ -20,5 +20,11 @@ urlpatterns = [
     # Health Packages
     path('api/packages/', HealthPackageListView.as_view(), name='api_packages_list'),
     path('api/packages/<int:pk>/', HealthPackageDetailView.as_view(), name='api_package_detail'),
+
+    # Admin Management Endpoints
+    path('api/admin/tests/', DiagnosticTestListView.as_view(), name='api_admin_tests_list_create'),
+    path('api/admin/tests/<int:pk>/', DiagnosticTestDetailView.as_view(), name='api_admin_test_detail'),
+    path('api/admin/packages/', HealthPackageListView.as_view(), name='api_admin_packages_list_create'),
+    path('api/admin/packages/<int:pk>/', HealthPackageDetailView.as_view(), name='api_admin_package_detail'),
 ]
 

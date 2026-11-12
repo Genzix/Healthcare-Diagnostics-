@@ -146,8 +146,63 @@ class PartnerSlotListView(APIView):
 class CheckServiceabilityView(APIView):
     """
     API endpoint: Check if a partner centre services a given pincode for home sample collection.
+    Supports both POST and GET with query parameters ?pincode=...&partner_id=...
     """
     permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        pincode = request.query_params.get('pincode', '').strip()
+        partner_id = request.query_params.get('partner_id')
+
+        if not pincode:
+            return Response(
+                {"success": False, "message": "Pincode parameter is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if partner_id:
+            try:
+                partner = DiagnosticPartner.objects.get(pk=partner_id, status='ACTIVE')
+            except DiagnosticPartner.DoesNotExist:
+                return Response(
+                    {"success": False, "message": "Diagnostic partner centre not found."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            is_serviceable = partner.is_serviceable(pincode)
+            return Response({
+                "success": True,
+                "partner_id": partner.id,
+                "centre_name": partner.centre_name,
+                "pincode": pincode,
+                "is_serviceable": is_serviceable,
+                "home_collection_fee": float(partner.home_collection_fee),
+                "message": "Home collection is available in this area." if is_serviceable else "Home collection is currently not available for this pincode.",
+            }, status=status.HTTP_200_OK)
+
+        # If no specific partner_id is provided, search all active partners
+        serviceable_partners = DiagnosticPartner.objects.filter(
+            status='ACTIVE',
+            offers_home_collection=True,
+            service_areas__pincode=pincode,
+            service_areas__is_active=True
+        ).distinct()
+
+        is_serviceable = serviceable_partners.exists()
+        return Response({
+            "success": True,
+            "pincode": pincode,
+            "is_serviceable": is_serviceable,
+            "serviceable_partners_count": serviceable_partners.count(),
+            "partners": [
+                {
+                    "id": p.id,
+                    "centre_name": p.centre_name,
+                    "city": p.city,
+                    "home_collection_fee": float(p.home_collection_fee)
+                } for p in serviceable_partners
+            ],
+            "message": "Home collection is available in this area." if is_serviceable else "Home collection is currently not available for this pincode."
+        }, status=status.HTTP_200_OK)
 
     def post(self, request, *args, **kwargs):
         serializer = CheckServiceabilitySerializer(data=request.data)
