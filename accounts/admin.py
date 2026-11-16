@@ -1,6 +1,30 @@
+from django import forms
 from django.contrib import admin
+from django.contrib.admin.forms import AdminAuthenticationForm
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from .models import User, PhoneOTP, FamilyMember
+
+
+class AdminEmailAuthenticationForm(AdminAuthenticationForm):
+    """
+    Custom Admin Login Form that changes the field label from 'Phone number' to 'Email Address'
+    and supports authentication via either Email address or Phone number.
+    """
+    username = forms.CharField(
+        label="Email Address",
+        widget=forms.TextInput(attrs={
+            'autofocus': True,
+            'placeholder': 'admin@1mindoc.com (or phone number)',
+            'class': 'vTextField'
+        })
+    )
+
+
+# Configure Django Admin Portal Headers and Login Form
+admin.site.login_form = AdminEmailAuthenticationForm
+admin.site.site_header = "1MinDoc Healthcare Administration"
+admin.site.site_title = "1MinDoc Admin Portal"
+admin.site.index_title = "1MinDoc Operations Dashboard"
 
 
 class FamilyMemberInline(admin.TabularInline):

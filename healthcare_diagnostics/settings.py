@@ -119,6 +119,13 @@ else:
     }
 
 
+# Authentication Backends (supports both Email and Phone login in Django Admin & API)
+AUTHENTICATION_BACKENDS = [
+    'accounts.backends.EmailOrPhoneModelBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
 
