@@ -32,6 +32,8 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     partner_name = serializers.CharField(source='partner.centre_name', read_only=True)
     partner_address = serializers.CharField(source='partner.address_line', read_only=True)
     partner_phone = serializers.CharField(source='partner.contact_phone', read_only=True)
+    report_download_url = serializers.SerializerMethodField()
+    has_report = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
@@ -73,6 +75,12 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             'cancelled_by',
             'cancellation_reason',
             'cancellation_time',
+            'report_file',
+            'report_uploaded_at',
+            'report_notes',
+            'report_name',
+            'report_download_url',
+            'has_report',
             'items',
             'payments',
             'created_at',
@@ -80,6 +88,14 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             'confirmed_at',
             'completed_at',
         ]
+
+    def get_report_download_url(self, obj):
+        if obj.booking_status in ['REPORT_READY', 'TEST_COMPLETED'] or getattr(obj, 'report_file', None):
+            return f"/api/bookings/{obj.booking_id}/download-report/"
+        return None
+
+    def get_has_report(self, obj):
+        return bool(getattr(obj, 'report_file', None) or obj.booking_status in ['REPORT_READY', 'TEST_COMPLETED'])
 
 
 class BookingListSerializer(serializers.ModelSerializer):
@@ -182,7 +198,67 @@ class PartnerRejectBookingSerializer(serializers.Serializer):
 
 
 class PartnerStatusUpdateSerializer(serializers.Serializer):
-    new_status = serializers.ChoiceField(choices=['SAMPLE_COLLECTED', 'TEST_COMPLETED'])
+    new_status = serializers.CharField(required=False)
+    status = serializers.CharField(required=False)
+    report_file = serializers.FileField(required=False, allow_null=True)
+    report_notes = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+    report_name = serializers.CharField(required=False, allow_blank=True)
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if not data_copy.get('new_status') and data_copy.get('status'):
+            data_copy['new_status'] = data_copy.get('status')
+        if not data_copy.get('report_notes') and data_copy.get('notes'):
+            data_copy['report_notes'] = data_copy.get('notes')
+        return super().to_internal_value(data_copy)
+
+    def validate(self, attrs):
+        if not attrs.get('new_status'):
+            raise serializers.ValidationError({"new_status": "Service status is required (e.g. 'new_status' or 'status')."})
+        return attrs
+
+    def validate_new_status(self, value):
+        if not value:
+            raise serializers.ValidationError("Status is required.")
+        status_str = str(value).strip().upper().replace(' ', '_').replace('-', '_')
+        status_mapping = {
+            'SAMPLE_COLLECTED': 'SAMPLE_COLLECTED',
+            'SAMPLE_COLLECTION': 'SAMPLE_COLLECTED',
+            'SAMPLE_DONE': 'SAMPLE_COLLECTED',
+            'VISIT_DONE': 'SAMPLE_COLLECTED',
+
+            'LAB_ANALYSIS': 'LAB_ANALYSIS',
+            'IN_ANALYSIS': 'LAB_ANALYSIS',
+            'ANALYSIS': 'LAB_ANALYSIS',
+            'PROCESSING': 'LAB_ANALYSIS',
+            'LAB_PROCESSING': 'LAB_ANALYSIS',
+            'UNDER_TESTING': 'LAB_ANALYSIS',
+            'UNDER_ANALYSIS': 'LAB_ANALYSIS',
+            'SAMPLE_RECEIVED_AT_LAB': 'LAB_ANALYSIS',
+
+            'REPORT_READY': 'REPORT_READY',
+            'REPORT_GENERATED': 'REPORT_READY',
+            'REPORT_UPLOADED': 'REPORT_READY',
+            'READY': 'REPORT_READY',
+
+            'TEST_COMPLETED': 'TEST_COMPLETED',
+            'COMPLETED': 'TEST_COMPLETED',
+            'DONE': 'TEST_COMPLETED',
+        }
+        normalized = status_mapping.get(status_str, status_str)
+        valid_statuses = ['SAMPLE_COLLECTED', 'LAB_ANALYSIS', 'REPORT_READY', 'TEST_COMPLETED']
+        if normalized not in valid_statuses:
+            raise serializers.ValidationError(
+                f"'{value}' is not a valid service status. Choose from: {', '.join(valid_statuses)}"
+            )
+        return normalized
+
+
+class PartnerReportUploadSerializer(serializers.Serializer):
+    report_file = serializers.FileField(required=False, allow_null=True)
+    report_notes = serializers.CharField(required=False, allow_blank=True)
+    report_name = serializers.CharField(required=False, allow_blank=True)
 
 
 class PartnerOfflineBalancePaymentSerializer(serializers.Serializer):

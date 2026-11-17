@@ -16,6 +16,8 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
 from .views import api_root_view
 
 urlpatterns = [
@@ -26,3 +28,6 @@ urlpatterns = [
     path('', include('partners.urls')),
     path('', include('bookings.urls')),
 ]
+
+if settings.DEBUG or getattr(settings, 'SERVE_MEDIA_LOCAL', True):
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

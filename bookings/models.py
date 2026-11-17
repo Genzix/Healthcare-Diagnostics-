@@ -29,6 +29,8 @@ class Booking(models.Model):
         ('AWAITING_PARTNER_CONFIRMATION', 'Awaiting Partner Confirmation'),
         ('CONFIRMED', 'Confirmed'),
         ('SAMPLE_COLLECTED', 'Sample Collected / Visit Done'),
+        ('LAB_ANALYSIS', 'Lab Analysis in Progress'),
+        ('REPORT_READY', 'Report Ready / Generated'),
         ('TEST_COMPLETED', 'Test Completed'),
         ('CANCELLED', 'Cancelled'),
         ('REJECTED_BY_PARTNER', 'Rejected by Partner'),
@@ -145,6 +147,17 @@ class Booking(models.Model):
     cancellation_reason = models.TextField(blank=True)
     cancellation_time = models.DateTimeField(null=True, blank=True)
 
+    # Diagnostic Report (1MinDoc Branding)
+    report_file = models.FileField(
+        upload_to='booking_reports/%Y/%m/',
+        null=True,
+        blank=True,
+        help_text="Uploaded diagnostic lab test report"
+    )
+    report_uploaded_at = models.DateTimeField(null=True, blank=True)
+    report_notes = models.TextField(blank=True, help_text="Clinical summary or lab technician notes")
+    report_name = models.CharField(max_length=255, blank=True)
+
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -256,6 +269,8 @@ class Notification(models.Model):
         ('PARTNER_CONFIRMATION', 'Partner Confirmation'),
         ('PARTNER_REJECTION', 'Partner Rejection'),
         ('BOOKING_REMINDER', 'Booking Reminder'),
+        ('LAB_ANALYSIS', 'Lab Analysis in Progress'),
+        ('REPORT_READY', 'Report Ready / Generated'),
         ('TEST_COMPLETED', 'Test Completed'),
         ('BALANCE_PAYMENT_REMINDER', 'Balance Payment Reminder'),
     )

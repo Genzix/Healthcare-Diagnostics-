@@ -423,7 +423,9 @@ class PartnerRejectBookingView(APIView):
 
 class PartnerUpdateStatusView(APIView):
     """
-    Partner Dashboard: Update service status: Confirmed -> SAMPLE_COLLECTED -> TEST_COMPLETED.
+    Partner Dashboard: Update service status across the diagnostic lifecycle:
+    CONFIRMED -> SAMPLE_COLLECTED -> LAB_ANALYSIS -> REPORT_READY -> TEST_COMPLETED.
+    Optionally accepts report_file and report_notes when marking REPORT_READY or TEST_COMPLETED.
     """
     permission_classes = [IsAuthenticated]
 
@@ -441,14 +443,152 @@ class PartnerUpdateStatusView(APIView):
             return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
         new_status = serializer.validated_data['new_status']
-        booking, error = partner_update_service_status(booking=booking, partner_user=request.user, new_status=new_status)
+        report_file = request.FILES.get('report_file') or serializer.validated_data.get('report_file')
+        report_notes = serializer.validated_data.get('report_notes', '')
+        report_name = serializer.validated_data.get('report_name', '')
+
+        booking, error = partner_update_service_status(
+            booking=booking,
+            partner_user=request.user,
+            new_status=new_status,
+            report_file=report_file,
+            report_notes=report_notes,
+            report_name=report_name
+        )
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
-            {"success": True, "message": f"Booking status updated to {new_status}.", "booking": BookingDetailSerializer(booking).data},
+            {
+                "success": True,
+                "message": f"Booking status updated to {new_status}.",
+                "booking": BookingDetailSerializer(booking).data,
+                "report_download_url": f"/api/bookings/{booking.booking_id}/download-report/"
+            },
             status=status.HTTP_200_OK
         )
+
+
+class PartnerUploadReportView(APIView):
+    """
+    POST /api/partner/bookings/<id>/upload-report/
+    Diagnostic Partner uploads the official test report (PDF, image, or clinical findings).
+    Automatically advances status to REPORT_READY and notifies the patient with 1MinDoc branding.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        partner = get_authenticated_partner(request.user)
+        if not partner:
+            return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
+
+        booking = get_partner_booking(partner, pk)
+        if not booking:
+            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        report_file = request.FILES.get('report_file')
+        report_notes = request.data.get('report_notes', '')
+        report_name = request.data.get('report_name', '')
+
+        if not report_file and not report_notes:
+            return Response({
+                "success": False,
+                "message": "Please attach a report file (PDF/Image) or provide clinical notes."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Advance status to REPORT_READY if currently at earlier stage
+        target_status = booking.booking_status
+        if target_status in ['CONFIRMED', 'SAMPLE_COLLECTED', 'LAB_ANALYSIS']:
+            target_status = 'REPORT_READY'
+
+        booking, error = partner_update_service_status(
+            booking=booking,
+            partner_user=request.user,
+            new_status=target_status,
+            report_file=report_file,
+            report_notes=report_notes,
+            report_name=report_name
+        )
+        if error:
+            return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "success": True,
+            "message": f"Report uploaded successfully for booking {booking.booking_id}. Patient notified.",
+            "booking": BookingDetailSerializer(booking).data,
+            "report_download_url": f"/api/bookings/{booking.booking_id}/download-report/"
+        }, status=status.HTTP_200_OK)
+
+
+class BookingReportDownloadView(APIView):
+    """
+    GET /api/bookings/<id>/report/ or GET /api/bookings/<id>/download-report/
+    Delivers the diagnostic report with 1MinDoc branding.
+    - If accessed by browser or format=pdf: streams official 1MinDoc branded PDF.
+    - If format=json: returns JSON report metadata and download links.
+    """
+    permission_classes = [AllowAny]
+
+    def get_booking(self, pk):
+        if str(pk).isdigit():
+            return Booking.objects.filter(pk=pk).first()
+        return Booking.objects.filter(booking_id=pk).first()
+
+    def get(self, request, pk, *args, **kwargs):
+        from django.http import HttpResponse, FileResponse
+        from bookings.services import generate_1mindoc_pdf_report
+        import os
+
+        booking = self.get_booking(pk)
+        if not booking:
+            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # JSON metadata format
+        if request.query_params.get('format') == 'json' or 'application/json' in request.META.get('HTTP_ACCEPT', ''):
+            report_file_url = None
+            if getattr(booking, 'report_file', None) and hasattr(booking.report_file, 'url'):
+                try:
+                    report_file_url = request.build_absolute_uri(booking.report_file.url)
+                except Exception:
+                    report_file_url = str(booking.report_file.name)
+
+            return Response({
+                "success": True,
+                "branding": "1MinDoc Healthcare Diagnostics",
+                "booking_id": booking.booking_id,
+                "patient_name": booking.patient_name,
+                "partner_centre": booking.partner.centre_name if booking.partner else "Diagnostic Centre",
+                "booking_status": booking.booking_status,
+                "has_uploaded_report": bool(getattr(booking, 'report_file', None)),
+                "report_file_url": report_file_url,
+                "download_url": request.build_absolute_uri(f"/api/bookings/{booking.booking_id}/download-report/"),
+                "report_notes": getattr(booking, 'report_notes', ''),
+                "report_uploaded_at": getattr(booking, 'report_uploaded_at', None),
+            }, status=status.HTTP_200_OK)
+
+        # PDF Download Delivery:
+        # Check if partner uploaded an existing PDF file
+        if getattr(booking, 'report_file', None) and booking.report_file:
+            try:
+                file_path = booking.report_file.path
+                if os.path.exists(file_path):
+                    response = FileResponse(open(file_path, 'rb'), content_type='application/pdf')
+                    response['Content-Disposition'] = f'attachment; filename="1MinDoc_Report_{booking.booking_id}.pdf"'
+                    return response
+            except Exception:
+                pass
+
+        # Otherwise, dynamically generate high-quality 1MinDoc Branded PDF Report
+        try:
+            pdf_bytes = generate_1mindoc_pdf_report(booking)
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
+            response['Content-Disposition'] = f'attachment; filename="1MinDoc_Report_{booking.booking_id}.pdf"'
+            return response
+        except Exception as exc:
+            return Response({
+                "success": False,
+                "message": f"Failed to generate report: {str(exc)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class PartnerRecordBalancePaymentView(APIView):

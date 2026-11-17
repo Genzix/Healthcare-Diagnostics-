@@ -12,7 +12,9 @@ from .views import (
     PartnerAcceptBookingView,
     PartnerRejectBookingView,
     PartnerUpdateStatusView,
+    PartnerUploadReportView,
     PartnerRecordBalancePaymentView,
+    BookingReportDownloadView,
     AdminDashboardMetricsView,
     AdminAllBookingsListView,
     AdminPartnerApprovalView,
@@ -33,6 +35,12 @@ urlpatterns = [
     path('api/bookings/<int:pk>/cancel/', BookingCancelView.as_view(), name='api_booking_cancel_int'),
     path('api/bookings/<str:pk>/cancel/', BookingCancelView.as_view(), name='api_booking_cancel_str'),
 
+    # Patient Report Viewing & 1MinDoc Branded PDF Download
+    path('api/bookings/<int:pk>/report/', BookingReportDownloadView.as_view(), name='api_booking_report_int'),
+    path('api/bookings/<str:pk>/report/', BookingReportDownloadView.as_view(), name='api_booking_report_str'),
+    path('api/bookings/<int:pk>/download-report/', BookingReportDownloadView.as_view(), name='api_booking_download_report_int'),
+    path('api/bookings/<str:pk>/download-report/', BookingReportDownloadView.as_view(), name='api_booking_download_report_str'),
+
     # Notifications
     path('api/notifications/', NotificationListView.as_view(), name='api_notifications_list'),
     path('api/notifications/<int:pk>/mark-read/', NotificationMarkReadView.as_view(), name='api_notification_mark_read'),
@@ -45,6 +53,8 @@ urlpatterns = [
     path('api/partner/bookings/<str:pk>/reject/', PartnerRejectBookingView.as_view(), name='api_partner_booking_reject_str'),
     path('api/partner/bookings/<int:pk>/update-status/', PartnerUpdateStatusView.as_view(), name='api_partner_booking_update_status_int'),
     path('api/partner/bookings/<str:pk>/update-status/', PartnerUpdateStatusView.as_view(), name='api_partner_booking_update_status_str'),
+    path('api/partner/bookings/<int:pk>/upload-report/', PartnerUploadReportView.as_view(), name='api_partner_booking_upload_report_int'),
+    path('api/partner/bookings/<str:pk>/upload-report/', PartnerUploadReportView.as_view(), name='api_partner_booking_upload_report_str'),
     path('api/partner/bookings/<int:pk>/record-balance/', PartnerRecordBalancePaymentView.as_view(), name='api_partner_booking_record_balance_int'),
     path('api/partner/bookings/<str:pk>/record-balance/', PartnerRecordBalancePaymentView.as_view(), name='api_partner_booking_record_balance_str'),
 
