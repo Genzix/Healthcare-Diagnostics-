@@ -92,8 +92,8 @@ class RegisterSendOTPView(APIView):
             "otp_expiry_minutes": getattr(settings, 'OTP_EXPIRY_MINUTES', 5),
         }
 
-        # Include OTP in response during DEBUG mode for effortless testing
-        if getattr(settings, 'DEBUG', False) and otp_record:
+        # Include OTP in response when SHOW_DEBUG_OTP is enabled (demo, no SMS gateway yet)
+        if getattr(settings, 'SHOW_DEBUG_OTP', False) and otp_record:
             response_data["debug_otp"] = otp_record.otp_code
 
         return Response(response_data, status=status.HTTP_200_OK)
@@ -197,7 +197,7 @@ class RegisterResendOTPView(APIView):
             "phone_number": phone_number,
             "otp_expiry_minutes": getattr(settings, 'OTP_EXPIRY_MINUTES', 5),
         }
-        if getattr(settings, 'DEBUG', False) and otp_record:
+        if getattr(settings, 'SHOW_DEBUG_OTP', False) and otp_record:
             response_data["debug_otp"] = otp_record.otp_code
 
         return Response(response_data, status=status.HTTP_200_OK)
@@ -253,7 +253,7 @@ class LoginSendOTPView(APIView):
             "phone_number": phone_number,
             "otp_expiry_minutes": getattr(settings, 'OTP_EXPIRY_MINUTES', 5),
         }
-        if getattr(settings, 'DEBUG', False) and otp_record:
+        if getattr(settings, 'SHOW_DEBUG_OTP', False) and otp_record:
             response_data["debug_otp"] = otp_record.otp_code
 
         return Response(response_data, status=status.HTTP_200_OK)

@@ -29,6 +29,10 @@ SECRET_KEY = 'django-insecure-q&@fwi^33)5krx!o)ddfz%aur#op4^lx@fs56t+$u&@knbq+lf
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
 
+# Demo/testing only: return the OTP in the send-otp API response (field: debug_otp)
+# until a real SMS gateway is configured. Set SHOW_DEBUG_OTP=False in .env for go-live.
+SHOW_DEBUG_OTP = os.getenv('SHOW_DEBUG_OTP', 'False').strip().lower() in ('1', 'true', 'yes')
+
 # ALLOWED_HOSTS = ['*']
 ALLOWED_HOSTS = [
     '1mindoc.genzix.space',
