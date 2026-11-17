@@ -364,6 +364,11 @@ def authenticate_with_password(phone_number: str, password: str):
     User = get_user_model()
 
     user = User.objects.filter(phone_number=phone_number).first()
+    if not user and not phone_number.startswith('+'):
+        user = User.objects.filter(phone_number=f"+91{phone_number}").first()
+    if not user and phone_number.startswith('+91'):
+        user = User.objects.filter(phone_number=phone_number[3:]).first()
+
     if not user or not user.check_password(password):
         return None, None, "Invalid phone number or password."
 

@@ -252,6 +252,125 @@ def get_partner_for_user(user):
     return None
 
 
+class PartnerLoginView(APIView):
+    """
+    POST /api/partner/login/
+    Dedicated Partner Login endpoint using email or phone number + password.
+    Authenticates staff and lab managers of Diagnostic Partner centres.
+    Allows partner centres created by Admin to log in without prior manual registration.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        from accounts.services import normalize_phone_number, get_tokens_for_user
+        from accounts.models import User
+        from accounts.serializers import UserSerializer
+
+        email = str(request.data.get('email') or '').strip()
+        phone_number = str(request.data.get('phone_number') or '').strip()
+        password = str(request.data.get('password') or '')
+
+        if not password:
+            return Response({
+                "success": False,
+                "message": "Password is required for partner login."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        user = None
+        clean_phone = ""
+        if email:
+            user = User.objects.filter(email__iexact=email).first()
+        elif phone_number:
+            clean_phone = normalize_phone_number(phone_number)
+            user = User.objects.filter(phone_number=clean_phone).first()
+            if not user and not clean_phone.startswith('+'):
+                user = User.objects.filter(phone_number=f"+91{clean_phone}").first()
+            if not user and clean_phone.startswith('+91'):
+                user = User.objects.filter(phone_number=clean_phone[3:]).first()
+        else:
+            return Response({
+                "success": False,
+                "message": "Partner email or phone number is required."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # If User account does not exist yet, check if an Admin added a DiagnosticPartner centre with this phone/email
+        partner_centre = None
+        if not user:
+            phone_variants = [clean_phone, phone_number]
+            if clean_phone and not clean_phone.startswith('+'):
+                phone_variants.append(f"+91{clean_phone}")
+            if clean_phone and clean_phone.startswith('+91'):
+                phone_variants.append(clean_phone[3:])
+
+            partner_filter = Q(contact_phone__in=phone_variants)
+            if email:
+                partner_filter = partner_filter | Q(contact_email__iexact=email)
+
+            partner_centre = DiagnosticPartner.objects.filter(partner_filter).first()
+            if partner_centre:
+                if partner_centre.user:
+                    user = partner_centre.user
+                else:
+                    # Auto-provision user account for the admin-onboarded partner
+                    target_phone = clean_phone if clean_phone.startswith('+') else f"+91{clean_phone}" if clean_phone else None
+                    user = User.objects.create_user(
+                        phone_number=target_phone,
+                        email=partner_centre.contact_email or email,
+                        password=password,
+                        first_name=partner_centre.contact_person or partner_centre.centre_name,
+                        role='LAB_STAFF',
+                        is_phone_verified=True,
+                    )
+                    partner_centre.user = user
+                    partner_centre.save(update_fields=['user'])
+
+        if not user or not user.check_password(password):
+            return Response({
+                "success": False,
+                "message": "Invalid credentials. Please verify your email/phone and password."
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        if not user.is_active:
+            return Response({
+                "success": False,
+                "message": "This partner account has been deactivated."
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        # Retrieve partner centre profile
+        partner = get_partner_for_user(user) or partner_centre
+        if not partner and user.role != 'LAB_STAFF' and not user.is_staff:
+            return Response({
+                "success": False,
+                "message": "No diagnostic partner centre profile associated with this account."
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if partner and partner.status == 'SUSPENDED':
+            return Response({
+                "success": False,
+                "message": "Your diagnostic partner centre is suspended. Please contact platform support."
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        jwt_tokens = get_tokens_for_user(user)
+        partner_data = None
+        if partner:
+            partner_data = {
+                "id": partner.id,
+                "centre_name": partner.centre_name,
+                "license_number": partner.license_number,
+                "city": partner.city,
+                "status": partner.status,
+                "offers_home_collection": partner.offers_home_collection,
+            }
+
+        return Response({
+            "success": True,
+            "message": f"Welcome back, {partner.centre_name if partner else user.get_full_name() or user.phone_number}.",
+            "partner": partner_data,
+            "user": UserSerializer(user).data,
+            "tokens": jwt_tokens
+        }, status=status.HTTP_200_OK)
+
+
 class PartnerProfileManageView(APIView):
     """
     Partner Dashboard: View & manage partner centre profile.
@@ -500,6 +619,7 @@ class AdminPartnerListCreateView(APIView):
         data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
         service_pincodes = data.pop('service_pincodes', None)
         user_id = data.get('user_id') or data.get('user')
+        password = data.pop('password', None)
 
         serializer = DiagnosticPartnerSerializer(data=data)
         if not serializer.is_valid():
@@ -511,14 +631,42 @@ class AdminPartnerListCreateView(APIView):
 
         partner = serializer.save()
 
-        # Link user account if provided
-        if not partner.user and user_id:
-            from django.contrib.auth import get_user_model
-            User = get_user_model()
-            linked_user = User.objects.filter(pk=user_id).first()
-            if linked_user:
-                partner.user = linked_user
-                partner.save(update_fields=['user'])
+        # Link existing or auto-create User account for partner dashboard login
+        from django.contrib.auth import get_user_model
+        from accounts.services import normalize_phone_number
+        User = get_user_model()
+
+        clean_phone = normalize_phone_number(partner.contact_phone)
+        partner_user = None
+
+        if user_id:
+            partner_user = User.objects.filter(pk=user_id).first()
+        elif clean_phone:
+            partner_user = User.objects.filter(phone_number=clean_phone).first()
+            if not partner_user and not clean_phone.startswith('+'):
+                partner_user = User.objects.filter(phone_number=f"+91{clean_phone}").first()
+        elif partner.contact_email:
+            partner_user = User.objects.filter(email__iexact=partner.contact_email).first()
+
+        # If user account doesn't exist, auto-create it with role LAB_STAFF
+        if not partner_user and (clean_phone or partner.contact_email):
+            target_phone = clean_phone if clean_phone.startswith('+') else f"+91{clean_phone}" if clean_phone else None
+            partner_user = User.objects.create_user(
+                phone_number=target_phone,
+                email=partner.contact_email or '',
+                password=password or 'Partner@123',
+                first_name=partner.contact_person or partner.centre_name,
+                role='LAB_STAFF',
+                is_phone_verified=True,
+            )
+        elif partner_user and password:
+            partner_user.set_password(password)
+            partner_user.role = 'LAB_STAFF'
+            partner_user.save()
+
+        if partner_user and not partner.user:
+            partner.user = partner_user
+            partner.save(update_fields=['user'])
 
         # If initial service pincodes provided, create them
         if service_pincodes and isinstance(service_pincodes, list):
