@@ -16,13 +16,19 @@ phone_validator = RegexValidator(
 class CustomUserManager(BaseUserManager):
     """
     Custom manager for User model where phone_number is the unique identifier.
+    Supports creating superusers/admins with optional phone numbers (stored as None/empty).
     """
-    def create_user(self, phone_number, password=None, **extra_fields):
+    def create_user(self, phone_number=None, password=None, **extra_fields):
         if not phone_number:
-            raise ValueError("The phone number must be provided.")
-        
-        # Normalize phone number
-        phone_number = str(phone_number).strip().replace(" ", "").replace("-", "")
+            if not (extra_fields.get('is_superuser') or extra_fields.get('role') == 'ADMIN' or extra_fields.get('is_staff')):
+                raise ValueError("The phone number must be provided.")
+            phone_number = None
+        else:
+            # Normalize phone number
+            phone_number = str(phone_number).strip().replace(" ", "").replace("-", "")
+            if not phone_number:
+                phone_number = None
+
         extra_fields.setdefault('is_active', True)
 
         user = self.model(phone_number=phone_number, **extra_fields)
@@ -34,7 +40,7 @@ class CustomUserManager(BaseUserManager):
         user.save(using=self._db)
         return user
 
-    def create_superuser(self, phone_number, password=None, **extra_fields):
+    def create_superuser(self, phone_number=None, password=None, **extra_fields):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_phone_verified', True)
@@ -59,6 +65,8 @@ class User(AbstractBaseUser, PermissionsMixin):
     phone_number = models.CharField(
         max_length=17,
         unique=True,
+        null=True,
+        blank=True,
         validators=[phone_validator],
         help_text="Primary phone number used for login and registration."
     )
@@ -95,7 +103,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     objects = CustomUserManager()
 
     USERNAME_FIELD = 'phone_number'
-    REQUIRED_FIELDS = []
+    REQUIRED_FIELDS = ['email']
 
     class Meta:
         verbose_name = 'User'
@@ -104,15 +112,16 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         full_name = self.get_full_name()
+        identifier = self.phone_number or self.email or f"User-{self.pk}"
         if full_name:
-            return f"{self.phone_number} ({full_name} - {self.role})"
-        return f"{self.phone_number} ({self.role})"
+            return f"{identifier} ({full_name} - {self.role})"
+        return f"{identifier} ({self.role})"
 
     def get_full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
 
     def get_short_name(self):
-        return self.first_name or self.phone_number
+        return self.first_name or self.phone_number or self.email or "User"
 
     def get_age(self):
         if not self.date_of_birth:

@@ -216,7 +216,8 @@ def get_tokens_for_user(user):
     try:
         from rest_framework_simplejwt.tokens import RefreshToken
         refresh = RefreshToken.for_user(user)
-        refresh['phone_number'] = str(user.phone_number)
+        refresh['phone_number'] = str(user.phone_number or '')
+        refresh['email'] = str(user.email or '')
         refresh['role'] = str(user.role)
         refresh['is_staff'] = bool(user.is_staff)
         return {

@@ -105,7 +105,7 @@ class UserSerializer(serializers.ModelSerializer):
     loyalty_info = serializers.SerializerMethodField()
 
     def get_avatar_initial(self, obj):
-        name = obj.get_full_name() or obj.first_name or obj.phone_number or 'H'
+        name = obj.get_full_name() or obj.first_name or obj.email or obj.phone_number or 'H'
         return (name[0] if name else 'H').upper()
 
     def get_gender_display(self, obj):

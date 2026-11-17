@@ -48,8 +48,9 @@ class Command(BaseCommand):
             raise CommandError('Password is required.')
 
         if not phone:
-            # Generate a unique phone number placeholder for this admin
-            phone = f"+9190000{secrets.randbelow(90000) + 10000}"
+            phone = None
+        else:
+            phone = str(phone).strip().replace(" ", "").replace("-", "") or None
 
         admin = User.objects.create_user(
             phone_number=phone,

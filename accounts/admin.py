@@ -7,14 +7,14 @@ from .models import User, PhoneOTP, FamilyMember
 
 class AdminEmailAuthenticationForm(AdminAuthenticationForm):
     """
-    Custom Admin Login Form that changes the field label from 'Phone number' to 'Email Address'
+    Custom Admin Login Form that displays 'Email Address (or Phone Number)'
     and supports authentication via either Email address or Phone number.
     """
     username = forms.CharField(
         label="Email Address",
         widget=forms.TextInput(attrs={
             'autofocus': True,
-            'placeholder': 'admin@1mindoc.com (or phone number)',
+            'placeholder': 'admin@example.com (or phone number)',
             'class': 'vTextField'
         })
     )
