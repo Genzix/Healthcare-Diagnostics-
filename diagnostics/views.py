@@ -60,7 +60,14 @@ class DiagnosticTestListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
-        queryset = DiagnosticTest.objects.filter(is_available=True).select_related('category')
+        is_admin_endpoint = request.path.startswith('/api/admin/')
+        if is_admin_endpoint or request.query_params.get('include_all') in ['true', '1']:
+            queryset = DiagnosticTest.objects.all().select_related('category')
+            is_avail = request.query_params.get('is_available')
+            if is_avail is not None:
+                queryset = queryset.filter(is_available=is_avail.lower() in ['true', '1'])
+        else:
+            queryset = DiagnosticTest.objects.filter(is_available=True).select_related('category')
 
         search = request.query_params.get('search')
         if search:
@@ -91,6 +98,7 @@ class DiagnosticTestListView(APIView):
                 "success": True,
                 "count": queryset.count(),
                 "tests": serializer.data,
+                "results": serializer.data,
             },
             status=status.HTTP_200_OK
         )
@@ -214,7 +222,14 @@ class HealthPackageListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
-        queryset = HealthPackage.objects.filter(is_available=True).prefetch_related('tests')
+        is_admin_endpoint = request.path.startswith('/api/admin/')
+        if is_admin_endpoint or request.query_params.get('include_all') in ['true', '1']:
+            queryset = HealthPackage.objects.all().prefetch_related('tests')
+            is_avail = request.query_params.get('is_available')
+            if is_avail is not None:
+                queryset = queryset.filter(is_available=is_avail.lower() in ['true', '1'])
+        else:
+            queryset = HealthPackage.objects.filter(is_available=True).prefetch_related('tests')
 
         search = request.query_params.get('search')
         if search:
@@ -230,6 +245,7 @@ class HealthPackageListView(APIView):
                 "success": True,
                 "count": queryset.count(),
                 "packages": serializer.data,
+                "results": serializer.data,
             },
             status=status.HTTP_200_OK
         )

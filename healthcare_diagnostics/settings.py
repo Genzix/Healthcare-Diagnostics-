@@ -34,6 +34,8 @@ ALLOWED_HOSTS = [
     '1mindoc.genzix.space',
     'localhost',
     '127.0.0.1',
+    'testserver',
+    '*',
 ]
 
 

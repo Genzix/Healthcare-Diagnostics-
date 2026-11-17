@@ -11,6 +11,8 @@ from .views import (
     PartnerTestPricingManageView,
     PartnerPackagePricingManageView,
     PartnerDashboardSummaryView,
+    AdminPartnerListCreateView,
+    AdminPartnerDetailView,
 )
 
 app_name = 'partners'
@@ -21,6 +23,10 @@ urlpatterns = [
     path('api/partners/<int:pk>/', PartnerDetailView.as_view(), name='api_partner_detail'),
     path('api/partners/<int:pk>/slots/', PartnerSlotListView.as_view(), name='api_partner_slots'),
     path('api/partners/check-serviceability/', CheckServiceabilityView.as_view(), name='api_check_serviceability'),
+
+    # Admin Partner Management Endpoints
+    path('api/admin/partners/', AdminPartnerListCreateView.as_view(), name='api_admin_partners_list_create'),
+    path('api/admin/partners/<int:pk>/', AdminPartnerDetailView.as_view(), name='api_admin_partner_detail'),
 
     # Partner Dashboard Endpoints
     path('api/partner/dashboard/summary/', PartnerDashboardSummaryView.as_view(), name='api_partner_dashboard_summary'),

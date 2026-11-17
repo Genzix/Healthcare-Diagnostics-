@@ -64,6 +64,7 @@ class DiagnosticPartnerSerializer(serializers.ModelSerializer):
         model = DiagnosticPartner
         fields = [
             'id',
+            'user',
             'centre_name',
             'license_number',
             'contact_person',
@@ -81,15 +82,23 @@ class DiagnosticPartnerSerializer(serializers.ModelSerializer):
             'service_areas_count',
             'created_at',
         ]
+        extra_kwargs = {
+            'user': {'required': False, 'allow_null': True},
+        }
 
 
 class DiagnosticPartnerDetailSerializer(serializers.ModelSerializer):
     service_areas = PartnerServiceAreaSerializer(many=True, read_only=True)
+    user_email = serializers.EmailField(source='user.email', read_only=True)
+    user_phone = serializers.CharField(source='user.phone_number', read_only=True)
 
     class Meta:
         model = DiagnosticPartner
         fields = [
             'id',
+            'user',
+            'user_email',
+            'user_phone',
             'centre_name',
             'license_number',
             'contact_person',

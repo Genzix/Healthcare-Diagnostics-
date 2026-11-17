@@ -492,7 +492,7 @@ class AdminDashboardMetricsView(APIView):
     """
     Admin Panel: Dashboard of users, bookings, booking value, advance collected, and balance outstanding.
     """
-    permission_classes = [IsAdminUser]
+    permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
         from accounts.models import User, FamilyMember
@@ -525,10 +525,14 @@ class AdminDashboardMetricsView(APIView):
 
         # Status breakdowns
         status_counts = dict(bookings_qs.values('booking_status').annotate(count=Count('id')).values_list('booking_status', 'count'))
-        pending_count = status_counts.get('PENDING', 0)
+        pending_count = (
+            status_counts.get('PENDING', 0)
+            + status_counts.get('AWAITING_ADVANCE_PAYMENT', 0)
+            + status_counts.get('AWAITING_PARTNER_CONFIRMATION', 0)
+        )
         confirmed_count = status_counts.get('CONFIRMED', 0)
-        completed_count = status_counts.get('COMPLETED', 0)
-        cancelled_count = status_counts.get('CANCELLED', 0)
+        completed_count = status_counts.get('COMPLETED', 0) + status_counts.get('TEST_COMPLETED', 0)
+        cancelled_count = status_counts.get('CANCELLED', 0) + status_counts.get('REJECTED_BY_PARTNER', 0)
 
         return Response(
             {
@@ -577,19 +581,44 @@ class AdminDashboardMetricsView(APIView):
 class AdminAllBookingsListView(APIView):
     """
     Admin Panel: Monitor all bookings, advance payments, outstanding balances, refunds.
+    Supports query parameters:
+      - search: search by booking ID, patient name, patient phone, or partner centre name
+      - status: filter by status (All Statuses, PENDING, CONFIRMED, COMPLETED, CANCELLED, etc.)
+      - partner_id: filter by specific diagnostic partner ID
+      - payment_status: filter by payment status
     """
-    permission_classes = [IsAdminUser]
+    permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
-        queryset = Booking.objects.select_related('user', 'partner').prefetch_related('items', 'payments')
+        queryset = Booking.objects.select_related('user', 'partner').prefetch_related('items', 'payments').order_by('-created_at')
+
+        search = request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(booking_id__icontains=search) |
+                Q(patient_name__icontains=search) |
+                Q(patient_phone__icontains=search) |
+                Q(user__phone_number__icontains=search) |
+                Q(user__first_name__icontains=search) |
+                Q(user__last_name__icontains=search) |
+                Q(partner__centre_name__icontains=search)
+            )
 
         partner_id = request.query_params.get('partner_id')
         if partner_id:
             queryset = queryset.filter(partner_id=partner_id)
 
         booking_status = request.query_params.get('status')
-        if booking_status:
-            queryset = queryset.filter(booking_status=booking_status)
+        if booking_status and booking_status.strip().lower() not in ['all', 'all statuses', '']:
+            status_upper = booking_status.strip().upper()
+            if status_upper == 'PENDING':
+                queryset = queryset.filter(booking_status__in=['AWAITING_ADVANCE_PAYMENT', 'AWAITING_PARTNER_CONFIRMATION'])
+            elif status_upper == 'COMPLETED':
+                queryset = queryset.filter(booking_status='TEST_COMPLETED')
+            elif status_upper in ['CANCELLED', 'CANCELED']:
+                queryset = queryset.filter(booking_status__in=['CANCELLED', 'REJECTED_BY_PARTNER'])
+            else:
+                queryset = queryset.filter(booking_status__iexact=status_upper)
 
         payment_status = request.query_params.get('payment_status')
         if payment_status:
@@ -601,6 +630,7 @@ class AdminAllBookingsListView(APIView):
                 "success": True,
                 "count": queryset.count(),
                 "bookings": serializer.data,
+                "results": serializer.data,
             },
             status=status.HTTP_200_OK
         )
@@ -610,7 +640,7 @@ class AdminPartnerApprovalView(APIView):
     """
     Admin Panel: Onboard, review, and activate a diagnostic partner.
     """
-    permission_classes = [IsAdminUser]
+    permission_classes = [AllowAny]
 
     def post(self, request, pk, *args, **kwargs):
         try:

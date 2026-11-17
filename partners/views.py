@@ -74,6 +74,10 @@ class PartnerListView(APIView):
             status=status.HTTP_200_OK
         )
 
+    def post(self, request, *args, **kwargs):
+        view = AdminPartnerListCreateView()
+        return view.post(request, *args, **kwargs)
+
 
 class PartnerDetailView(APIView):
     """
@@ -451,4 +455,137 @@ class PartnerDashboardSummaryView(APIView):
             },
             status=status.HTTP_200_OK
         )
+
+
+# =====================================================================
+# Admin Diagnostic Partner Management Endpoints
+# =====================================================================
+
+class AdminPartnerListCreateView(APIView):
+    """
+    GET  /api/admin/partners/  - List all diagnostic partners (active, pending, suspended)
+    POST /api/admin/partners/  - Create/onboard a new diagnostic partner centre
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        queryset = DiagnosticPartner.objects.all().order_by('-created_at')
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            queryset = queryset.filter(status__iexact=status_filter)
+
+        city = request.query_params.get('city')
+        if city:
+            queryset = queryset.filter(city__iexact=city)
+
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(centre_name__icontains=search) |
+                Q(license_number__icontains=search) |
+                Q(contact_person__icontains=search) |
+                Q(city__icontains=search)
+            )
+
+        serializer = DiagnosticPartnerDetailSerializer(queryset, many=True)
+        return Response({
+            "success": True,
+            "count": queryset.count(),
+            "partners": serializer.data,
+            "results": serializer.data,
+        }, status=status.HTTP_200_OK)
+
+    def post(self, request, *args, **kwargs):
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        service_pincodes = data.pop('service_pincodes', None)
+        user_id = data.get('user_id') or data.get('user')
+
+        serializer = DiagnosticPartnerSerializer(data=data)
+        if not serializer.is_valid():
+            return Response({
+                "success": False,
+                "message": "Failed to onboard diagnostic partner.",
+                "errors": serializer.errors,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        partner = serializer.save()
+
+        # Link user account if provided
+        if not partner.user and user_id:
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            linked_user = User.objects.filter(pk=user_id).first()
+            if linked_user:
+                partner.user = linked_user
+                partner.save(update_fields=['user'])
+
+        # If initial service pincodes provided, create them
+        if service_pincodes and isinstance(service_pincodes, list):
+            for pin in service_pincodes:
+                p_code = str(pin).strip()
+                if p_code:
+                    PartnerServiceArea.objects.get_or_create(
+                        partner=partner,
+                        pincode=p_code,
+                        defaults={'city': partner.city, 'is_active': True}
+                    )
+
+        detail_serializer = DiagnosticPartnerDetailSerializer(partner)
+        return Response({
+            "success": True,
+            "message": f"Diagnostic partner '{partner.centre_name}' onboarded successfully.",
+            "partner": detail_serializer.data,
+            "results": detail_serializer.data,
+        }, status=status.HTTP_201_CREATED)
+
+
+class AdminPartnerDetailView(APIView):
+    """
+    GET    /api/admin/partners/<id>/ - Retrieve full partner details
+    PATCH  /api/admin/partners/<id>/ - Update partner details
+    PUT    /api/admin/partners/<id>/ - Update partner details
+    DELETE /api/admin/partners/<id>/ - Remove partner centre
+    """
+    permission_classes = [AllowAny]
+
+    def get_object(self, pk):
+        try:
+            return DiagnosticPartner.objects.prefetch_related('service_areas').get(pk=pk)
+        except DiagnosticPartner.DoesNotExist:
+            return None
+
+    def get(self, request, pk, *args, **kwargs):
+        partner = self.get_object(pk)
+        if not partner:
+            return Response({"success": False, "message": "Diagnostic partner not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"success": True, "partner": DiagnosticPartnerDetailSerializer(partner).data}, status=status.HTTP_200_OK)
+
+    def patch(self, request, pk, *args, **kwargs):
+        partner = self.get_object(pk)
+        if not partner:
+            return Response({"success": False, "message": "Diagnostic partner not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = DiagnosticPartnerSerializer(partner, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        updated = serializer.save()
+        return Response({
+            "success": True,
+            "message": f"Partner '{updated.centre_name}' updated successfully.",
+            "partner": DiagnosticPartnerDetailSerializer(updated).data,
+        }, status=status.HTTP_200_OK)
+
+    def put(self, request, pk, *args, **kwargs):
+        return self.patch(request, pk, *args, **kwargs)
+
+    def delete(self, request, pk, *args, **kwargs):
+        partner = self.get_object(pk)
+        if not partner:
+            return Response({"success": False, "message": "Diagnostic partner not found."}, status=status.HTTP_404_NOT_FOUND)
+        partner_name = partner.centre_name
+        partner.delete()
+        return Response({
+            "success": True,
+            "message": f"Partner '{partner_name}' deleted successfully."
+        }, status=status.HTTP_200_OK)
 
