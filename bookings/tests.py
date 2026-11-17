@@ -667,6 +667,31 @@ class LabReportPipelineTests(TestCase):
         self.assertEqual(booking.report_download_count, 2)
         self.assertEqual(booking.status_logs.filter(to_status='REPORT_DOWNLOADED').count(), 1)
 
+    def test_download_honours_accept_application_pdf(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        self.client.force_authenticate(self.user)
+        url = f'/api/bookings/{booking.booking_id}/download-report/'
+        for accept in ('application/pdf', 'application/pdf, application/json;q=0.9, */*;q=0.8', '*/*'):
+            res = self.client.get(url, HTTP_ACCEPT=accept)
+            self.assertEqual(res.status_code, 200, accept)
+            self.assertEqual(res['Content-Type'], 'application/pdf')
+            self.assertTrue(b''.join(res.streaming_content).startswith(b'%PDF-'))
+        meta = self.client.get(url + '?format=json', HTTP_ACCEPT='application/pdf')
+        self.assertEqual(meta.status_code, 200)
+        self.assertEqual(meta.json()['booking_id'], booking.booking_id)
+
+    def test_download_errors_are_json_even_when_pdf_is_requested(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='REPORT_VERIFIED')
+        self.client.force_authenticate(self.user)
+        res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/', HTTP_ACCEPT='application/pdf')
+        self.assertEqual(res.status_code, 403)
+        self.assertIn('application/json', res['Content-Type'])
+        self.assertEqual(res.json()['code'], 'report_not_available')
+        self.client.force_authenticate(None)
+        res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/', HTTP_ACCEPT='application/pdf')
+        self.assertIn(res.status_code, (401, 403))
+        self.assertIn('application/json', res['Content-Type'])
+
     def test_strangers_and_anonymous_users_cannot_download(self):
         booking = self.run_lab_pipeline(self.confirmed_booking())
         stranger = User.objects.create_user(phone_number='+919111122222', is_phone_verified=True)

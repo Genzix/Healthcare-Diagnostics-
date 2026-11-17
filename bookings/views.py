@@ -7,6 +7,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from decimal import Decimal
@@ -461,6 +462,23 @@ class PartnerUploadReportView(PartnerBookingView):
 _SAFE_NAME = re.compile(r'[^A-Za-z0-9._-]+')
 
 
+class PDFRenderer(BaseRenderer):
+    """
+    Lets DRF content negotiation accept `Accept: application/pdf`.
+
+    It never renders anything itself: the file goes out as a FileResponse, which
+    skips DRF rendering. Without it, DRF only knows JSON and answers 406
+    before the view runs.
+    """
+    media_type = 'application/pdf'
+    format = 'pdf'
+    charset = None
+    render_style = 'binary'
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
 class BookingReportDownloadView(APIView):
     """
     GET /api/bookings/<id>/download-report/   (alias: /report/)
@@ -470,8 +488,20 @@ class BookingReportDownloadView(APIView):
       partner → its own bookings, once uploaded (to verify it)
       admin   → always
     ?format=json returns metadata instead; ?inline=1 opens in the browser instead of downloading.
+
+    Accepts `Accept: application/pdf` (or anything else). The file goes out as
+    a PDF; errors and metadata always go out as JSON.
     """
     permission_classes = [IsAuthenticated]
+    renderer_classes = [JSONRenderer, PDFRenderer]
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        # Anything that is not the file (403/404/410, auth errors, ?format=json)
+        # is a dict payload: always render it as JSON, even when the client asked for PDF.
+        if isinstance(response, Response):
+            request.accepted_renderer = JSONRenderer()
+            request.accepted_media_type = JSONRenderer.media_type
+        return super().finalize_response(request, response, *args, **kwargs)
 
     def get(self, request, pk, *args, **kwargs):
         qs = Booking.objects.select_related('partner')
