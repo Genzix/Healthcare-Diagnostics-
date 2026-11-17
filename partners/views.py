@@ -247,9 +247,14 @@ class CheckServiceabilityView(APIView):
 # =====================================================================
 
 def get_partner_for_user(user):
-    if hasattr(user, 'partner_profile'):
-        return user.partner_profile
-    return None
+    if not user:
+        return None
+    try:
+        if hasattr(user, 'partner_profile') and user.partner_profile:
+            return user.partner_profile
+    except Exception:
+        pass
+    return DiagnosticPartner.objects.filter(user=user).first()
 
 
 class PartnerLoginView(APIView):
@@ -258,6 +263,7 @@ class PartnerLoginView(APIView):
     Dedicated Partner Login endpoint using email or phone number + password.
     Authenticates staff and lab managers of Diagnostic Partner centres.
     Allows partner centres created by Admin to log in without prior manual registration.
+    Supports phone_number, mobile_number, mobile, username, or email.
     """
     permission_classes = [AllowAny]
 
@@ -268,8 +274,19 @@ class PartnerLoginView(APIView):
             from accounts.serializers import UserSerializer
 
             email = str(request.data.get('email') or '').strip()
-            phone_number = str(request.data.get('phone_number') or '').strip()
+            phone_number = str(
+                request.data.get('phone_number') or 
+                request.data.get('mobile_number') or 
+                request.data.get('mobile') or 
+                request.data.get('phone') or 
+                request.data.get('username') or ''
+            ).strip()
             password = str(request.data.get('password') or '')
+
+            # If username was provided as an email address
+            if not email and '@' in phone_number:
+                email = phone_number
+                phone_number = ''
 
             if not password:
                 return Response({
@@ -277,27 +294,32 @@ class PartnerLoginView(APIView):
                     "message": "Password is required for partner login."
                 }, status=status.HTTP_400_BAD_REQUEST)
 
+            if not email and not phone_number:
+                return Response({
+                    "success": False,
+                    "message": "Partner email or mobile number is required."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
             user = None
             clean_phone = ""
             if email:
                 user = User.objects.filter(email__iexact=email).first()
-            elif phone_number:
+
+            if not user and phone_number:
                 clean_phone = normalize_phone_number(phone_number)
                 user = User.objects.filter(phone_number=clean_phone).first()
                 if not user and not clean_phone.startswith('+'):
                     user = User.objects.filter(phone_number=f"+91{clean_phone}").first()
                 if not user and clean_phone.startswith('+91'):
                     user = User.objects.filter(phone_number=clean_phone[3:]).first()
-            else:
-                return Response({
-                    "success": False,
-                    "message": "Partner email or phone number is required."
-                }, status=status.HTTP_400_BAD_REQUEST)
 
-            # If User account does not exist yet, check if an Admin added a DiagnosticPartner centre with this phone/email
-            partner_centre = None
-            if not user:
-                phone_variants = [clean_phone, phone_number]
+            # Partner centre resolution & auto-linking
+            partner = None
+            if user:
+                partner = get_partner_for_user(user)
+
+            if not partner:
+                phone_variants = [p for p in [clean_phone, phone_number] if p]
                 if clean_phone and not clean_phone.startswith('+'):
                     phone_variants.append(f"+91{clean_phone}")
                 if clean_phone and clean_phone.startswith('+91'):
@@ -307,23 +329,39 @@ class PartnerLoginView(APIView):
                 if email:
                     partner_filter = partner_filter | Q(contact_email__iexact=email)
 
-                partner_centre = DiagnosticPartner.objects.filter(partner_filter).first()
-                if partner_centre:
-                    if partner_centre.user:
-                        user = partner_centre.user
-                    else:
-                        # Auto-provision user account for the admin-onboarded partner
+                partner = DiagnosticPartner.objects.filter(partner_filter).first()
+
+                if partner:
+                    if partner.user:
+                        user = partner.user
+                    elif not user:
+                        # Auto-provision user account for admin-onboarded partner
                         target_phone = clean_phone if clean_phone.startswith('+') else f"+91{clean_phone}" if clean_phone else None
-                        user = User.objects.create_user(
-                            phone_number=target_phone,
-                            email=partner_centre.contact_email or email,
-                            password=password,
-                            first_name=partner_centre.contact_person or partner_centre.centre_name,
-                            role='LAB_STAFF',
-                            is_phone_verified=True,
-                        )
-                        partner_centre.user = user
-                        partner_centre.save(update_fields=['user'])
+                        existing_user = None
+                        if target_phone:
+                            existing_user = User.objects.filter(phone_number=target_phone).first()
+                        if not existing_user and clean_phone:
+                            existing_user = User.objects.filter(phone_number=clean_phone).first()
+                        if not existing_user and partner.contact_email:
+                            existing_user = User.objects.filter(email__iexact=partner.contact_email).first()
+
+                        if existing_user:
+                            user = existing_user
+                        else:
+                            user = User.objects.create_user(
+                                phone_number=target_phone,
+                                email=partner.contact_email or email or None,
+                                password=password,
+                                first_name=partner.contact_person or partner.centre_name,
+                                role='LAB_STAFF',
+                                is_phone_verified=True,
+                            )
+                        partner.user = user
+                        partner.save(update_fields=['user'])
+                    else:
+                        # Partner exists, user exists: link them together!
+                        partner.user = user
+                        partner.save(update_fields=['user'])
 
             if not user or not user.check_password(password):
                 return Response({
@@ -337,8 +375,10 @@ class PartnerLoginView(APIView):
                     "message": "This partner account has been deactivated."
                 }, status=status.HTTP_403_FORBIDDEN)
 
-            # Retrieve partner centre profile
-            partner = get_partner_for_user(user) or partner_centre
+            # Ensure partner profile is retrieved
+            if not partner:
+                partner = get_partner_for_user(user)
+
             if not partner and user.role != 'LAB_STAFF' and not user.is_staff:
                 return Response({
                     "success": False,
@@ -360,22 +400,21 @@ class PartnerLoginView(APIView):
             jwt_tokens = get_tokens_for_user(user)
             partner_data = None
             if partner:
-                partner_data = {
-                    "id": partner.id,
-                    "centre_name": partner.centre_name,
-                    "license_number": partner.license_number,
-                    "city": partner.city,
-                    "status": partner.status,
-                    "offers_home_collection": partner.offers_home_collection,
-                }
+                partner_data = DiagnosticPartnerDetailSerializer(partner).data
 
-            return Response({
+            response_data = {
                 "success": True,
                 "message": f"Welcome back, {partner.centre_name if partner else user.get_full_name() or user.phone_number}.",
                 "partner": partner_data,
                 "user": UserSerializer(user).data,
                 "tokens": jwt_tokens
-            }, status=status.HTTP_200_OK)
+            }
+            if jwt_tokens:
+                response_data["token"] = jwt_tokens.get("access")
+                response_data["access"] = jwt_tokens.get("access")
+                response_data["refresh"] = jwt_tokens.get("refresh")
+
+            return Response(response_data, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({
                 "success": False,

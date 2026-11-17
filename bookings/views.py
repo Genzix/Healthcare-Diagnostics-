@@ -321,9 +321,15 @@ class NotificationMarkReadView(APIView):
 # =====================================================================
 
 def get_authenticated_partner(user):
-    if hasattr(user, 'partner_profile'):
-        return user.partner_profile
-    return None
+    if not user or not user.is_authenticated:
+        return None
+    try:
+        if hasattr(user, 'partner_profile') and user.partner_profile:
+            return user.partner_profile
+    except Exception:
+        pass
+    from partners.models import DiagnosticPartner
+    return DiagnosticPartner.objects.filter(user=user).first()
 
 
 def get_partner_booking(partner, pk):
