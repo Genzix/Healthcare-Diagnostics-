@@ -209,6 +209,8 @@ class Payment(models.Model):
         ('CASH', 'Cash'),
         ('UPI', 'UPI'),
         ('CARD', 'Debit/Credit Card'),
+        ('WALLET', 'Digital Wallet'),
+        ('NET_BANKING', 'Net Banking'),
     )
 
     STATUS_CHOICES = (

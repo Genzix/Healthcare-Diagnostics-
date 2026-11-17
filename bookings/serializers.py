@@ -134,13 +134,43 @@ class BookingCreateSerializer(serializers.Serializer):
 
 
 class AdvancePaymentRequestSerializer(serializers.Serializer):
-    payment_mode = serializers.ChoiceField(choices=['ONLINE', 'UPI', 'CARD'], default='ONLINE')
+    payment_mode = serializers.CharField(required=False, default='ONLINE')
     gateway_transaction_id = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_payment_mode(self, value):
+        if not value:
+            return 'ONLINE'
+        mode = str(value).strip().upper()
+        mode_mapping = {
+            'CREDIT_CARD': 'CARD',
+            'DEBIT_CARD': 'CARD',
+            'NETBANKING': 'NET_BANKING',
+        }
+        mode = mode_mapping.get(mode, mode)
+        allowed = ['ONLINE', 'UPI', 'CARD', 'WALLET', 'NET_BANKING', 'CASH']
+        if mode not in allowed:
+            raise serializers.ValidationError(f'"{value}" is not a valid choice. Choose from: {", ".join(allowed)}.')
+        return mode
 
 
 class BalancePaymentRequestSerializer(serializers.Serializer):
-    payment_mode = serializers.ChoiceField(choices=['ONLINE', 'UPI', 'CARD'], default='ONLINE')
+    payment_mode = serializers.CharField(required=False, default='ONLINE')
     gateway_transaction_id = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_payment_mode(self, value):
+        if not value:
+            return 'ONLINE'
+        mode = str(value).strip().upper()
+        mode_mapping = {
+            'CREDIT_CARD': 'CARD',
+            'DEBIT_CARD': 'CARD',
+            'NETBANKING': 'NET_BANKING',
+        }
+        mode = mode_mapping.get(mode, mode)
+        allowed = ['ONLINE', 'UPI', 'CARD', 'WALLET', 'NET_BANKING', 'CASH']
+        if mode not in allowed:
+            raise serializers.ValidationError(f'"{value}" is not a valid choice. Choose from: {", ".join(allowed)}.')
+        return mode
 
 
 class PartnerAcceptBookingSerializer(serializers.Serializer):
@@ -156,8 +186,23 @@ class PartnerStatusUpdateSerializer(serializers.Serializer):
 
 
 class PartnerOfflineBalancePaymentSerializer(serializers.Serializer):
-    payment_mode = serializers.ChoiceField(choices=['CASH', 'UPI', 'CARD'], default='CASH')
+    payment_mode = serializers.CharField(required=False, default='CASH')
     offline_reference = serializers.CharField(required=True, help_text="Cash receipt number or UPI txn reference")
+
+    def validate_payment_mode(self, value):
+        if not value:
+            return 'CASH'
+        mode = str(value).strip().upper()
+        mode_mapping = {
+            'CREDIT_CARD': 'CARD',
+            'DEBIT_CARD': 'CARD',
+            'NETBANKING': 'NET_BANKING',
+        }
+        mode = mode_mapping.get(mode, mode)
+        allowed = ['CASH', 'UPI', 'CARD', 'WALLET', 'ONLINE', 'NET_BANKING']
+        if mode not in allowed:
+            raise serializers.ValidationError(f'"{value}" is not a valid choice. Choose from: {", ".join(allowed)}.')
+        return mode
 
 
 class BookingCancelSerializer(serializers.Serializer):
