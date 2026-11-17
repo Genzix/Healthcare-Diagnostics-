@@ -14,6 +14,7 @@ from .views import (
     AdminPartnerListCreateView,
     AdminPartnerDetailView,
     PartnerLoginView,
+    PartnerRegistrationView,
 )
 
 app_name = 'partners'
@@ -30,6 +31,7 @@ urlpatterns = [
     path('api/admin/partners/<int:pk>/', AdminPartnerDetailView.as_view(), name='api_admin_partner_detail'),
 
     # Partner Auth & Dashboard Endpoints
+    path('api/partner/register/', PartnerRegistrationView.as_view(), name='api_partner_register'),
     path('api/partner/login/', PartnerLoginView.as_view(), name='api_partner_login'),
     path('api/partner/dashboard/summary/', PartnerDashboardSummaryView.as_view(), name='api_partner_dashboard_summary'),
     path('api/partner/centre-profile/', PartnerProfileManageView.as_view(), name='api_partner_profile'),

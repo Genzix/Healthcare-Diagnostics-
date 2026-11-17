@@ -344,11 +344,99 @@ class PartnerLoginView(APIView):
                 "message": "No diagnostic partner centre profile associated with this account."
             }, status=status.HTTP_403_FORBIDDEN)
 
+        if partner and partner.status == 'PENDING':
+            return Response({
+                "success": False,
+                "message": "Your diagnostic partner centre is pending admin approval. You will receive access once verified."
+            }, status=status.HTTP_403_FORBIDDEN)
+
         if partner and partner.status == 'SUSPENDED':
             return Response({
                 "success": False,
                 "message": "Your diagnostic partner centre is suspended. Please contact platform support."
             }, status=status.HTTP_403_FORBIDDEN)
+
+
+class PartnerRegistrationView(APIView):
+    """
+    POST /api/partner/register/
+    Public Inbound Application endpoint:
+    Allows diagnostic labs/scan centres to apply to become a partner on the platform.
+    Creates a partner profile in 'PENDING' status awaiting admin verification & approval.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, *args, **kwargs):
+        from accounts.models import User
+        from accounts.services import normalize_phone_number
+
+        data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+        password = str(data.pop('password', '') or '').strip()
+        service_pincodes = data.pop('service_pincodes', None)
+
+        if not password:
+            return Response({
+                "success": False,
+                "message": "Password is required to create your partner account."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Force status to PENDING for public registrations
+        data['status'] = 'PENDING'
+
+        serializer = DiagnosticPartnerSerializer(data=data)
+        if not serializer.is_valid():
+            return Response({
+                "success": False,
+                "message": "Validation failed.",
+                "errors": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        contact_phone = serializer.validated_data.get('contact_phone', '')
+        clean_phone = normalize_phone_number(contact_phone)
+        if User.objects.filter(phone_number=clean_phone).exists():
+            return Response({
+                "success": False,
+                "message": f"An account with phone number {contact_phone} already exists."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        contact_email = serializer.validated_data.get('contact_email', '')
+        if contact_email and User.objects.filter(email__iexact=contact_email).exists():
+            return Response({
+                "success": False,
+                "message": f"An account with email {contact_email} already exists."
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create user account for the partner
+        target_phone = clean_phone if clean_phone.startswith('+') else f"+91{clean_phone}" if clean_phone else None
+        user = User.objects.create_user(
+            phone_number=target_phone,
+            email=contact_email or '',
+            password=password,
+            first_name=serializer.validated_data.get('contact_person') or serializer.validated_data.get('centre_name'),
+            role='LAB_STAFF',
+            is_phone_verified=True,
+        )
+
+        partner = serializer.save(user=user)
+
+        # If service pincodes provided, create them
+        if service_pincodes and isinstance(service_pincodes, list):
+            for pin in service_pincodes:
+                p_code = str(pin).strip()
+                if p_code:
+                    PartnerServiceArea.objects.get_or_create(
+                        partner=partner,
+                        pincode=p_code,
+                        defaults={'city': partner.city, 'is_active': True}
+                    )
+
+        detail_serializer = DiagnosticPartnerDetailSerializer(partner)
+        return Response({
+            "success": True,
+            "message": f"Diagnostic partner application for '{partner.centre_name}' submitted successfully. Your account is pending admin verification.",
+            "partner": detail_serializer.data,
+            "status": "PENDING"
+        }, status=status.HTTP_201_CREATED)
 
         jwt_tokens = get_tokens_for_user(user)
         partner_data = None
