@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Booking, BookingItem, Payment, Notification
+from .models import Booking, BookingItem, BookingStatusLog, Payment, Notification
 
 
 class BookingItemInline(admin.TabularInline):
@@ -23,6 +23,17 @@ class PaymentInline(admin.TabularInline):
         'recorded_by_partner',
         'created_at',
     )
+
+
+class BookingStatusLogInline(admin.TabularInline):
+    """Audit trail is append-only — visible, never editable."""
+    model = BookingStatusLog
+    extra = 0
+    can_delete = False
+    readonly_fields = ('created_at', 'from_status', 'to_status', 'actor', 'actor_role', 'notes', 'metadata')
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Booking)
@@ -54,7 +65,7 @@ class BookingAdmin(admin.ModelAdmin):
         'user__phone_number',
         'partner__centre_name',
     )
-    inlines = [BookingItemInline, PaymentInline]
+    inlines = [BookingItemInline, PaymentInline, BookingStatusLogInline]
     ordering = ('-created_at',)
     readonly_fields = (
         'booking_id',

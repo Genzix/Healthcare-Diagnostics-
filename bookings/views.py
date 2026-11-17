@@ -1,13 +1,18 @@
-from rest_framework import status
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+import os
+import re
+
+from django.db.models import Sum, Count, Q, Prefetch
+from django.http import FileResponse
 from django.utils import timezone
-from django.db.models import Sum, Count, Q
-import uuid
+from rest_framework import status
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+from rest_framework.response import Response
+from rest_framework.views import APIView
 from decimal import Decimal
 
-from .models import Booking, BookingItem, Payment, Notification
+from . import workflow as wf
+from .models import Booking, BookingItem, BookingStatusLog, Payment, Notification
 from .serializers import (
     PriceEstimateRequestSerializer,
     BookingCreateSerializer,
@@ -23,12 +28,17 @@ from .serializers import (
     NotificationSerializer,
 )
 from .services import (
+    WorkflowError,
     calculate_booking_pricing,
     create_booking_order,
     process_advance_payment,
     partner_accept_booking,
     partner_reject_booking,
-    partner_update_service_status,
+    transition_booking,
+    upload_report,
+    record_report_download,
+    report_access,
+    cancel_booking,
     process_balance_payment,
     send_system_notification,
 )
@@ -36,14 +46,55 @@ from partners.models import DiagnosticPartner
 
 
 # =====================================================================
-# Patient / User Booking Views
+# Shared helpers
 # =====================================================================
 
-def get_user_booking(user, pk):
-    if str(pk).isdigit():
-        return Booking.objects.filter(user=user, pk=pk).first()
-    return Booking.objects.filter(user=user, booking_id=pk).first()
+def booking_queryset():
+    return (
+        Booking.objects
+        .select_related('partner', 'slot', 'user')
+        .prefetch_related('items', 'payments', Prefetch('status_logs', queryset=BookingStatusLog.objects.order_by('created_at', 'id')))
+    )
 
+
+def filter_by_status(queryset, value):
+    """
+    ?status= accepts a canonical status, a comma list, or a group name:
+      ?status=LAB_ANALYSIS   ?status=SAMPLE_RECEIVED,LAB_ANALYSIS   ?status=in_lab
+    Unknown values match nothing (rather than silently returning everything).
+    """
+    if not value or value.strip().lower() in ('all', 'all statuses'):
+        return queryset
+    wanted = set()
+    for part in value.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        group = wf.STATUS_GROUPS.get(part.lower())
+        wanted |= set(group) if group else {wf.normalize(part)}
+    return queryset.filter(booking_status__in=wanted)
+
+
+def workflow_error_response(exc: WorkflowError):
+    return Response(
+        {"success": False, "message": exc.message, "code": exc.code, "allowed_next_statuses": list(exc.allowed)},
+        status=exc.http_status,
+    )
+
+
+def booking_payload(booking, audience, **extra):
+    fresh = booking_queryset().get(pk=booking.pk)
+    return {"success": True, "booking": BookingDetailSerializer(fresh, context={'audience': audience}).data, **extra}
+
+
+def get_user_booking(user, pk):
+    qs = booking_queryset().filter(user=user)
+    return qs.filter(pk=pk).first() if str(pk).isdigit() else qs.filter(booking_id=pk).first()
+
+
+# =====================================================================
+# Patient / User Booking Views
+# =====================================================================
 
 class PriceEstimateView(APIView):
     """
@@ -75,41 +126,25 @@ class PriceEstimateView(APIView):
         return Response({"success": True, "estimate": pricing}, status=status.HTTP_200_OK)
 
 
+
 class BookingListCreateView(APIView):
     """
-    API endpoint: List user's bookings & create a new booking order.
-    Query filters:
-      - status: specific booking status
-      - view: 'upcoming', 'completed', 'cancelled'
+    GET  /api/bookings/?view=upcoming|completed|cancelled&status=<status|group|a,b>
+    POST /api/bookings/
     """
     permission_classes = [IsAuthenticated]
 
+    VIEW_GROUPS = {'upcoming': 'active', 'active': 'active', 'completed': 'completed', 'cancelled': 'cancelled', 'in_lab': 'in_lab'}
+
     def get(self, request, *args, **kwargs):
-        queryset = Booking.objects.filter(user=request.user).select_related('partner', 'slot')
-
+        queryset = Booking.objects.filter(user=request.user).select_related('partner', 'slot').prefetch_related('items')
         view_mode = request.query_params.get('view')
-        if view_mode == 'upcoming':
-            queryset = queryset.filter(
-                booking_status__in=['AWAITING_ADVANCE_PAYMENT', 'AWAITING_PARTNER_CONFIRMATION', 'CONFIRMED', 'SAMPLE_COLLECTED']
-            )
-        elif view_mode == 'completed':
-            queryset = queryset.filter(booking_status='TEST_COMPLETED')
-        elif view_mode == 'cancelled':
-            queryset = queryset.filter(booking_status__in=['CANCELLED', 'REJECTED_BY_PARTNER'])
-
-        booking_status = request.query_params.get('status')
-        if booking_status:
-            queryset = queryset.filter(booking_status=booking_status)
+        if view_mode in self.VIEW_GROUPS:
+            queryset = filter_by_status(queryset, self.VIEW_GROUPS[view_mode])
+        queryset = filter_by_status(queryset, request.query_params.get('status'))
 
         serializer = BookingListSerializer(queryset, many=True)
-        return Response(
-            {
-                "success": True,
-                "count": queryset.count(),
-                "bookings": serializer.data,
-            },
-            status=status.HTTP_200_OK
-        )
+        return Response({"success": True, "count": len(serializer.data), "bookings": serializer.data}, status=status.HTTP_200_OK)
 
     def post(self, request, *args, **kwargs):
         serializer = BookingCreateSerializer(data=request.data)
@@ -121,40 +156,24 @@ class BookingListCreateView(APIView):
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
-            {
-                "success": True,
-                "message": "Booking order created. Please pay 30% advance to submit your booking request.",
-                "booking": BookingDetailSerializer(booking).data,
-            },
-            status=status.HTTP_201_CREATED
+            booking_payload(booking, wf.PATIENT, message="Booking order created. Please pay 30% advance to submit your booking request."),
+            status=status.HTTP_201_CREATED,
         )
 
 
 class BookingDetailView(APIView):
-    """
-    API endpoint: Retrieve detailed booking breakdown, payment history, and items.
-    """
+    """GET /api/bookings/<id>/ — breakdown, payments, items and the full status timeline."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk, *args, **kwargs):
         booking = get_user_booking(request.user, pk)
         if not booking:
             return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        return Response(
-            {
-                "success": True,
-                "booking": BookingDetailSerializer(booking).data,
-            },
-            status=status.HTTP_200_OK
-        )
+        return Response({"success": True, "booking": BookingDetailSerializer(booking, context={'audience': wf.PATIENT}).data})
 
 
 class PayAdvanceView(APIView):
-    """
-    API endpoint: Collect 30% advance payment for booking.
-    Rule: After payment, status becomes 'AWAITING_PARTNER_CONFIRMATION'.
-    """
+    """POST /api/bookings/<id>/pay-advance/ — 30% advance → AWAITING_PARTNER_CONFIRMATION."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, *args, **kwargs):
@@ -169,26 +188,20 @@ class PayAdvanceView(APIView):
         payment, error = process_advance_payment(
             booking=booking,
             payment_mode=serializer.validated_data.get('payment_mode', 'ONLINE'),
-            gateway_transaction_id=serializer.validated_data.get('gateway_transaction_id')
+            gateway_transaction_id=serializer.validated_data.get('gateway_transaction_id') or request.data.get('transaction_id'),
         )
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(
-            {
-                "success": True,
-                "message": "Advance payment of 30% successful. Booking sent to partner centre awaiting confirmation.",
-                "payment": PaymentSerializer(payment).data,
-                "booking": BookingDetailSerializer(booking).data,
-            },
-            status=status.HTTP_200_OK
-        )
+        return Response(booking_payload(
+            booking, wf.PATIENT,
+            message="Advance payment of 30% successful. Booking sent to partner centre awaiting confirmation.",
+            payment=PaymentSerializer(payment).data,
+        ))
 
 
 class PayBalanceView(APIView):
-    """
-    API endpoint: Collect 70% balance payment online after test completion.
-    """
+    """POST /api/bookings/<id>/pay-balance/ — 70% balance, payable once the sample is collected."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, *args, **kwargs):
@@ -203,27 +216,20 @@ class PayBalanceView(APIView):
         payment, error = process_balance_payment(
             booking=booking,
             payment_mode=serializer.validated_data.get('payment_mode', 'ONLINE'),
-            gateway_transaction_id=serializer.validated_data.get('gateway_transaction_id'),
-            recorded_by_partner=False
+            gateway_transaction_id=serializer.validated_data.get('gateway_transaction_id') or request.data.get('transaction_id'),
+            recorded_by_partner=False,
         )
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(
-            {
-                "success": True,
-                "message": "70% balance paid successfully. Booking fully settled.",
-                "payment": PaymentSerializer(payment).data,
-                "booking": BookingDetailSerializer(booking).data,
-            },
-            status=status.HTTP_200_OK
-        )
+        return Response(booking_payload(
+            booking, wf.PATIENT, message="70% balance paid successfully. Booking fully settled.",
+            payment=PaymentSerializer(payment).data,
+        ))
 
 
 class BookingCancelView(APIView):
-    """
-    API endpoint: Cancel booking with a reason.
-    """
+    """POST /api/bookings/<id>/cancel/ — body: cancellation_reason (alias: reason). Only before sample collection."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, *args, **kwargs):
@@ -231,89 +237,41 @@ class BookingCancelView(APIView):
         if not booking:
             return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if booking.booking_status in ['SAMPLE_COLLECTED', 'TEST_COMPLETED', 'CANCELLED', 'REJECTED_BY_PARTNER']:
-            return Response(
-                {"success": False, "message": f"Booking in status '{booking.booking_status}' cannot be cancelled."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        serializer = BookingCancelSerializer(data=request.data)
+        reason = request.data.get('cancellation_reason') or request.data.get('reason') or ''
+        serializer = BookingCancelSerializer(data={'cancellation_reason': reason})
         if not serializer.is_valid():
             return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
-        booking.booking_status = 'CANCELLED'
-        booking.cancelled_by = 'USER'
-        booking.cancellation_reason = serializer.validated_data['cancellation_reason']
-        booking.cancellation_time = timezone.now()
-
-        # If advance was paid, mark refund
-        if booking.advance_amount_paid > Decimal('0.00'):
-            booking.payment_status = 'REFUNDED'
-            Payment.objects.create(
-                payment_id=f"REF-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
-                booking=booking,
-                payment_type='REFUND',
-                amount=booking.advance_amount_paid,
-                payment_mode='ONLINE',
-                status='SUCCESS',
-                gateway_transaction_id=f"REFUND-{uuid.uuid4().hex[:8].upper()}"
-            )
-
-        # Release slot capacity
-        if booking.slot and booking.slot.booked_count > 0:
-            booking.slot.booked_count -= 1
-            booking.slot.save(update_fields=['booked_count'])
-
-        booking.save()
-
-        send_system_notification(
-            user=request.user,
-            booking=booking,
-            notification_type='PAYMENT_RESULT',
-            title='Booking Cancelled',
-            message=f"Booking {booking.booking_id} has been cancelled. Refund will be credited within 3-5 working days."
-        )
-
-        return Response(
-            {
-                "success": True,
-                "message": "Booking cancelled successfully.",
-                "booking": BookingDetailSerializer(booking).data,
-            },
-            status=status.HTTP_200_OK
-        )
+        booking, error = cancel_booking(booking, request.user, serializer.validated_data['cancellation_reason'])
+        if error:
+            return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(booking_payload(booking, wf.PATIENT, message="Booking cancelled successfully."))
 
 
 class NotificationListView(APIView):
-    """
-    API endpoint: View user's notifications (OTP, payments, partner confirmation, reminders).
-    """
+    """GET /api/notifications/?unread=1"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
-        notifications = Notification.objects.filter(user=request.user)
-        serializer = NotificationSerializer(notifications, many=True)
-        return Response(
-            {
-                "success": True,
-                "unread_count": notifications.filter(is_read=False).count(),
-                "notifications": serializer.data,
-            },
-            status=status.HTTP_200_OK
-        )
+        notifications = Notification.objects.filter(user=request.user).select_related('booking')
+        unread_count = notifications.filter(is_read=False).count()
+        if request.query_params.get('unread') in ('1', 'true'):
+            notifications = notifications.filter(is_read=False)
+        return Response({
+            "success": True,
+            "unread_count": unread_count,
+            "notifications": NotificationSerializer(notifications[:200], many=True).data,
+        })
 
 
 class NotificationMarkReadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk, *args, **kwargs):
-        try:
-            notif = Notification.objects.get(pk=pk, user=request.user)
-            notif.is_read = True
-            notif.save(update_fields=['is_read'])
-            return Response({"success": True, "message": "Notification marked as read."}, status=status.HTTP_200_OK)
-        except Notification.DoesNotExist:
+        updated = Notification.objects.filter(pk=pk, user=request.user).update(is_read=True)
+        if not updated:
             return Response({"success": False, "message": "Notification not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"success": True, "message": "Notification marked as read."})
 
 
 # =====================================================================
@@ -328,20 +286,30 @@ def get_authenticated_partner(user):
             return user.partner_profile
     except Exception:
         pass
-    from partners.models import DiagnosticPartner
     return DiagnosticPartner.objects.filter(user=user).first()
 
 
 def get_partner_booking(partner, pk):
-    if str(pk).isdigit():
-        return Booking.objects.filter(partner=partner, pk=pk).first()
-    return Booking.objects.filter(partner=partner, booking_id=pk).first()
+    qs = booking_queryset().filter(partner=partner)
+    return qs.filter(pk=pk).first() if str(pk).isdigit() else qs.filter(booking_id=pk).first()
+
+
+class PartnerBookingView(APIView):
+    """Base: resolves the partner and the booking, 403/404 otherwise."""
+    permission_classes = [IsAuthenticated]
+
+    def resolve(self, request, pk):
+        partner = get_authenticated_partner(request.user)
+        if not partner:
+            return None, None, Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
+        booking = get_partner_booking(partner, pk)
+        if not booking:
+            return partner, None, Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        return partner, booking, None
 
 
 class PartnerBookingsListView(APIView):
-    """
-    Partner Dashboard: View incoming and assigned booking requests with patient and service details.
-    """
+    """GET /api/partner/bookings/?status=<status|group|a,b>&search=…"""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, *args, **kwargs):
@@ -349,263 +317,187 @@ class PartnerBookingsListView(APIView):
         if not partner:
             return Response({"success": False, "message": "Diagnostic partner profile required."}, status=status.HTTP_403_FORBIDDEN)
 
-        queryset = Booking.objects.filter(partner=partner).prefetch_related('items', 'payments')
+        queryset = filter_by_status(booking_queryset().filter(partner=partner), request.query_params.get('status'))
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(Q(booking_id__icontains=search) | Q(patient_name__icontains=search) | Q(patient_phone__icontains=search))
 
-        status_filter = request.query_params.get('status')
-        if status_filter:
-            queryset = queryset.filter(booking_status=status_filter)
-
-        serializer = BookingDetailSerializer(queryset, many=True)
-        return Response(
-            {
-                "success": True,
-                "count": queryset.count(),
-                "bookings": serializer.data,
-            },
-            status=status.HTTP_200_OK
-        )
+        data = BookingDetailSerializer(queryset, many=True, context={'audience': wf.PARTNER}).data
+        return Response({"success": True, "count": len(data), "bookings": data})
 
 
-class PartnerAcceptBookingView(APIView):
-    """
-    Partner Dashboard: Accept booking request -> Confirmed.
-    """
-    permission_classes = [IsAuthenticated]
+class PartnerBookingDetailView(PartnerBookingView):
+    """GET /api/partner/bookings/<id>/"""
 
+    def get(self, request, pk, *args, **kwargs):
+        _, booking, err = self.resolve(request, pk)
+        if err:
+            return err
+        return Response({"success": True, "booking": BookingDetailSerializer(booking, context={'audience': wf.PARTNER}).data})
+
+
+class PartnerAcceptBookingView(PartnerBookingView):
     def post(self, request, pk, *args, **kwargs):
-        partner = get_authenticated_partner(request.user)
-        if not partner:
-            return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
-
-        booking = get_partner_booking(partner, pk)
-        if not booking:
-            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-
+        _, booking, err = self.resolve(request, pk)
+        if err:
+            return err
         booking, error = partner_accept_booking(booking=booking, partner_user=request.user)
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response(
-            {"success": True, "message": f"Booking {booking.booking_id} confirmed successfully.", "booking": BookingDetailSerializer(booking).data},
-            status=status.HTTP_200_OK
-        )
+        return Response(booking_payload(booking, wf.PARTNER, message=f"Booking {booking.booking_id} confirmed successfully."))
 
 
-class PartnerRejectBookingView(APIView):
-    """
-    Partner Dashboard: Reject booking request with reason -> Triggers refund & notification.
-    """
-    permission_classes = [IsAuthenticated]
-
+class PartnerRejectBookingView(PartnerBookingView):
     def post(self, request, pk, *args, **kwargs):
-        partner = get_authenticated_partner(request.user)
-        if not partner:
-            return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
-
-        booking = get_partner_booking(partner, pk)
-        if not booking:
-            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-
+        _, booking, err = self.resolve(request, pk)
+        if err:
+            return err
         serializer = PartnerRejectBookingSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
-
-        reason = serializer.validated_data['rejection_reason']
-        booking, error = partner_reject_booking(booking=booking, partner_user=request.user, reason=reason)
+        booking, error = partner_reject_booking(booking=booking, partner_user=request.user, reason=serializer.validated_data['rejection_reason'])
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response(
-            {"success": True, "message": f"Booking {booking.booking_id} rejected. Refund initiated.", "booking": BookingDetailSerializer(booking).data},
-            status=status.HTTP_200_OK
-        )
+        return Response(booking_payload(booking, wf.PARTNER, message=f"Booking {booking.booking_id} rejected. Refund initiated."))
 
 
-class PartnerUpdateStatusView(APIView):
+class PartnerUpdateStatusView(PartnerBookingView):
     """
-    Partner Dashboard: Update service status across the diagnostic lifecycle:
-    CONFIRMED -> SAMPLE_COLLECTED -> LAB_ANALYSIS -> REPORT_READY -> TEST_COMPLETED.
-    Optionally accepts report_file and report_notes when marking REPORT_READY or TEST_COMPLETED.
+    POST /api/partner/bookings/<id>/update-status/   (JSON, or multipart when uploading)
+
+    Moves the booking one step: SAMPLE_COLLECTED → SAMPLE_RECEIVED → LAB_ANALYSIS →
+    REPORT_GENERATED → REPORT_UPLOADED → REPORT_VERIFIED → REPORT_READY.
+    Errors: 400 invalid step / missing requirement, 403 wrong actor, 409 stale `expected_status`.
     """
-    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def post(self, request, pk, *args, **kwargs):
-        partner = get_authenticated_partner(request.user)
-        if not partner:
-            return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
-
-        booking = get_partner_booking(partner, pk)
-        if not booking:
-            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-
+        _, booking, err = self.resolve(request, pk)
+        if err:
+            return err
         serializer = PartnerStatusUpdateSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        v = serializer.validated_data
+        target = v['new_status']
+        report_file = request.FILES.get('report_file') or v.get('report_file')
 
-        new_status = serializer.validated_data['new_status']
-        report_file = request.FILES.get('report_file') or serializer.validated_data.get('report_file')
-        report_notes = serializer.validated_data.get('report_notes', '')
-        report_name = serializer.validated_data.get('report_name', '')
+        try:
+            if target == wf.REPORT_UPLOADED:
+                upload_report(booking, request.user, report_file, report_name=v.get('report_name', ''),
+                              report_notes=v.get('report_notes', ''), notes=v.get('notes', ''),
+                              expected_status=v.get('expected_status'))
+            else:
+                transition_booking(
+                    booking, target, actor=request.user, actor_role=wf.PARTNER,
+                    notes=v.get('notes', ''), expected_status=v.get('expected_status'),
+                    report_notes=v.get('report_notes'),
+                    verified_by_name=v.get('verified_by_name', ''),
+                    verified_by_registration=v.get('verified_by_registration', ''),
+                )
+        except WorkflowError as exc:
+            return workflow_error_response(exc)
 
-        booking, error = partner_update_service_status(
-            booking=booking,
-            partner_user=request.user,
-            new_status=new_status,
-            report_file=report_file,
-            report_notes=report_notes,
-            report_name=report_name
-        )
-        if error:
-            return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response(
-            {
-                "success": True,
-                "message": f"Booking status updated to {new_status}.",
-                "booking": BookingDetailSerializer(booking).data,
-                "report_download_url": f"/api/bookings/{booking.booking_id}/download-report/"
-            },
-            status=status.HTTP_200_OK
-        )
+        return Response(booking_payload(
+            booking, wf.PARTNER,
+            message=f"Booking {booking.booking_id} moved to {wf.LABELS.get(booking.booking_status)}.",
+        ))
 
 
-class PartnerUploadReportView(APIView):
+class PartnerUploadReportView(PartnerBookingView):
     """
-    POST /api/partner/bookings/<id>/upload-report/
-    Diagnostic Partner uploads the official test report (PDF, image, or clinical findings).
-    Automatically advances status to REPORT_READY and notifies the patient with 1MinDoc branding.
+    POST /api/partner/bookings/<id>/upload-report/   multipart: report_file (PDF), report_notes, report_name
+    Allowed from LAB_ANALYSIS (records REPORT_GENERATED first), REPORT_GENERATED, or
+    REPORT_UPLOADED (replaces the file and clears any earlier verification).
+    The patient is NOT notified here — only on release after verification.
     """
-    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, pk, *args, **kwargs):
-        partner = get_authenticated_partner(request.user)
-        if not partner:
-            return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
+        _, booking, err = self.resolve(request, pk)
+        if err:
+            return err
+        try:
+            upload_report(
+                booking, request.user, request.FILES.get('report_file'),
+                report_name=request.data.get('report_name', ''),
+                report_notes=request.data.get('report_notes', ''),
+                notes=request.data.get('notes', ''),
+                expected_status=request.data.get('expected_status') or None,
+            )
+        except WorkflowError as exc:
+            return workflow_error_response(exc)
+        return Response(booking_payload(booking, wf.PARTNER, message=f"Report uploaded for {booking.booking_id}. It must be verified before release."))
 
-        booking = get_partner_booking(partner, pk)
-        if not booking:
-            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        report_file = request.FILES.get('report_file')
-        report_notes = request.data.get('report_notes', '')
-        report_name = request.data.get('report_name', '')
-
-        if not report_file and not report_notes:
-            return Response({
-                "success": False,
-                "message": "Please attach a report file (PDF/Image) or provide clinical notes."
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        # Advance status to REPORT_READY if currently at earlier stage
-        target_status = booking.booking_status
-        if target_status in ['CONFIRMED', 'SAMPLE_COLLECTED', 'LAB_ANALYSIS']:
-            target_status = 'REPORT_READY'
-
-        booking, error = partner_update_service_status(
-            booking=booking,
-            partner_user=request.user,
-            new_status=target_status,
-            report_file=report_file,
-            report_notes=report_notes,
-            report_name=report_name
-        )
-        if error:
-            return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response({
-            "success": True,
-            "message": f"Report uploaded successfully for booking {booking.booking_id}. Patient notified.",
-            "booking": BookingDetailSerializer(booking).data,
-            "report_download_url": f"/api/bookings/{booking.booking_id}/download-report/"
-        }, status=status.HTTP_200_OK)
+_SAFE_NAME = re.compile(r'[^A-Za-z0-9._-]+')
 
 
 class BookingReportDownloadView(APIView):
     """
-    GET /api/bookings/<id>/report/ or GET /api/bookings/<id>/download-report/
-    Delivers the diagnostic report with 1MinDoc branding.
-    - If accessed by browser or format=pdf: streams official 1MinDoc branded PDF.
-    - If format=json: returns JSON report metadata and download links.
-    """
-    permission_classes = [AllowAny]
+    GET /api/bookings/<id>/download-report/   (alias: /report/)
 
-    def get_booking(self, pk):
-        if str(pk).isdigit():
-            return Booking.objects.filter(pk=pk).first()
-        return Booking.objects.filter(booking_id=pk).first()
-
-    def get(self, request, pk, *args, **kwargs):
-        from django.http import HttpResponse, FileResponse
-        from bookings.services import generate_1mindoc_pdf_report
-        import os
-
-        booking = self.get_booking(pk)
-        if not booking:
-            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        # JSON metadata format
-        if request.query_params.get('format') == 'json' or 'application/json' in request.META.get('HTTP_ACCEPT', ''):
-            report_file_url = None
-            if getattr(booking, 'report_file', None) and hasattr(booking.report_file, 'url'):
-                try:
-                    report_file_url = request.build_absolute_uri(booking.report_file.url)
-                except Exception:
-                    report_file_url = str(booking.report_file.name)
-
-            return Response({
-                "success": True,
-                "branding": "1MinDoc Healthcare Diagnostics",
-                "booking_id": booking.booking_id,
-                "patient_name": booking.patient_name,
-                "partner_centre": booking.partner.centre_name if booking.partner else "Diagnostic Centre",
-                "booking_status": booking.booking_status,
-                "has_uploaded_report": bool(getattr(booking, 'report_file', None)),
-                "report_file_url": report_file_url,
-                "download_url": request.build_absolute_uri(f"/api/bookings/{booking.booking_id}/download-report/"),
-                "report_notes": getattr(booking, 'report_notes', ''),
-                "report_uploaded_at": getattr(booking, 'report_uploaded_at', None),
-            }, status=status.HTTP_200_OK)
-
-        # PDF Download Delivery:
-        # Check if partner uploaded an existing PDF file
-        if getattr(booking, 'report_file', None) and booking.report_file:
-            try:
-                file_path = booking.report_file.path
-                if os.path.exists(file_path):
-                    response = FileResponse(open(file_path, 'rb'), content_type='application/pdf')
-                    response['Content-Disposition'] = f'attachment; filename="1MinDoc_Report_{booking.booking_id}.pdf"'
-                    return response
-            except Exception:
-                pass
-
-        # Otherwise, dynamically generate high-quality 1MinDoc Branded PDF Report
-        try:
-            pdf_bytes = generate_1mindoc_pdf_report(booking)
-            response = HttpResponse(pdf_bytes, content_type='application/pdf')
-            response['Content-Disposition'] = f'attachment; filename="1MinDoc_Report_{booking.booking_id}.pdf"'
-            return response
-        except Exception as exc:
-            return Response({
-                "success": False,
-                "message": f"Failed to generate report: {str(exc)}"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-class PartnerRecordBalancePaymentView(APIView):
-    """
-    Partner Dashboard: Record approved offline 70% balance collection (Cash, UPI, Card).
+    Streams the laboratory-uploaded PDF to an authorised viewer only:
+      patient → after release (first download moves the booking to REPORT_DOWNLOADED)
+      partner → its own bookings, once uploaded (to verify it)
+      admin   → always
+    ?format=json returns metadata instead; ?inline=1 opens in the browser instead of downloading.
     """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk, *args, **kwargs):
+    def get(self, request, pk, *args, **kwargs):
+        qs = Booking.objects.select_related('partner')
+        booking = qs.filter(pk=pk).first() if str(pk).isdigit() else qs.filter(booking_id=pk).first()
         partner = get_authenticated_partner(request.user)
-        if not partner:
-            return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
+        allowed, audience, reason = report_access(booking, request.user, partner) if booking else (False, '', 'Booking not found.')
 
-        booking = get_partner_booking(partner, pk)
-        if not booking:
+        if not booking or (not allowed and not audience):
+            # Same answer for "doesn't exist" and "not yours" — don't leak booking IDs.
             return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        if not allowed:
+            return Response({"success": False, "message": reason, "code": "report_not_available",
+                             "booking_status": booking.booking_status}, status=status.HTTP_403_FORBIDDEN)
 
+        if request.query_params.get('format') == 'json':
+            return Response({
+                "success": True,
+                "booking_id": booking.booking_id,
+                "booking_status": booking.booking_status,
+                "report_name": booking.report_name,
+                "report_file_size": booking.report_file_size,
+                "report_sha256": booking.report_file_sha256,
+                "report_uploaded_at": booking.report_uploaded_at,
+                "report_verified_by_name": booking.report_verified_by_name,
+                "report_verified_at": booking.report_verified_at,
+                "report_released_at": booking.report_released_at,
+                "report_notes": booking.report_notes,
+                "download_url": request.build_absolute_uri(f"/api/bookings/{booking.booking_id}/download-report/"),
+            })
+
+        try:
+            handle = booking.report_file.open('rb')
+        except (FileNotFoundError, OSError):
+            return Response({"success": False, "message": "The report file is missing from storage. Please contact support."},
+                            status=status.HTTP_410_GONE)
+
+        if audience == wf.PATIENT:
+            record_report_download(booking, request.user)
+
+        filename = _SAFE_NAME.sub('_', f"Report_{booking.booking_id}_{booking.patient_name}")[:120] + '.pdf'
+        response = FileResponse(handle, content_type='application/pdf',
+                                as_attachment=request.query_params.get('inline') not in ('1', 'true'), filename=filename)
+        response['Cache-Control'] = 'private, no-store'
+        response['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+
+class PartnerRecordBalancePaymentView(PartnerBookingView):
+    """POST /api/partner/bookings/<id>/record-balance/ — offline 70% collection (Cash, UPI, Card)."""
+
+    def post(self, request, pk, *args, **kwargs):
+        _, booking, err = self.resolve(request, pk)
+        if err:
+            return err
         serializer = PartnerOfflineBalancePaymentSerializer(data=request.data)
         if not serializer.is_valid():
             return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
@@ -614,20 +506,34 @@ class PartnerRecordBalancePaymentView(APIView):
             booking=booking,
             payment_mode=serializer.validated_data['payment_mode'],
             offline_reference=serializer.validated_data['offline_reference'],
-            recorded_by_partner=True
+            recorded_by_partner=True,
         )
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(booking_payload(booking, wf.PARTNER, message="Offline balance payment recorded successfully.",
+                                        payment=PaymentSerializer(payment).data))
 
-        return Response(
-            {
-                "success": True,
-                "message": "Offline balance payment recorded successfully.",
-                "payment": PaymentSerializer(payment).data,
-                "booking": BookingDetailSerializer(booking).data,
-            },
-            status=status.HTTP_200_OK
-        )
+
+class BookingWorkflowView(APIView):
+    """GET /api/bookings/workflow/ — the pipeline definition, so clients never hard-code it."""
+    permission_classes = [AllowAny]
+
+    def get(self, request, *args, **kwargs):
+        steps = [{
+            'status': s,
+            'label': wf.LABELS[s],
+            'description': wf.STEPS[s].description if s in wf.STEPS else 'Partner accepted the booking.',
+            'action_label': wf.STEPS[s].action_label if s in wf.STEPS else None,
+            'actor': sorted(wf.STEPS[s].actors) if s in wf.STEPS else ['PARTNER'],
+            'notifies_patient': bool(wf.STEPS[s].notify_type) if s in wf.STEPS else True,
+            'push': wf.STEPS[s].push if s in wf.STEPS else False,
+        } for s in wf.PIPELINE]
+        return Response({
+            "success": True,
+            "pipeline": steps,
+            "groups": {k: sorted(v) for k, v in wf.STATUS_GROUPS.items()},
+            "labels": wf.LABELS,
+        })
 
 
 # =====================================================================
@@ -671,14 +577,14 @@ class AdminDashboardMetricsView(APIView):
 
         # Status breakdowns
         status_counts = dict(bookings_qs.values('booking_status').annotate(count=Count('id')).values_list('booking_status', 'count'))
-        pending_count = (
-            status_counts.get('PENDING', 0)
-            + status_counts.get('AWAITING_ADVANCE_PAYMENT', 0)
-            + status_counts.get('AWAITING_PARTNER_CONFIRMATION', 0)
-        )
-        confirmed_count = status_counts.get('CONFIRMED', 0)
-        completed_count = status_counts.get('COMPLETED', 0) + status_counts.get('TEST_COMPLETED', 0)
-        cancelled_count = status_counts.get('CANCELLED', 0) + status_counts.get('REJECTED_BY_PARTNER', 0)
+        def count_of(group):
+            return sum(status_counts.get(st, 0) for st in wf.STATUS_GROUPS[group])
+
+        pending_count = count_of('pending') + status_counts.get('PENDING', 0)
+        confirmed_count = status_counts.get(wf.CONFIRMED, 0)
+        in_lab_count = count_of('in_lab')
+        completed_count = count_of('completed') + status_counts.get('COMPLETED', 0)
+        cancelled_count = count_of('cancelled')
 
         return Response(
             {
@@ -690,6 +596,7 @@ class AdminDashboardMetricsView(APIView):
                 "total_bookings": total_bookings,
                 "pending": pending_count,
                 "confirmed": confirmed_count,
+                "in_lab": in_lab_count,
                 "completed": completed_count,
                 "cancelled": cancelled_count,
                 "packages": total_packages,
@@ -707,6 +614,7 @@ class AdminDashboardMetricsView(APIView):
                         "total_count": total_bookings,
                         "pending": pending_count,
                         "confirmed": confirmed_count,
+                        "in_lab": in_lab_count,
                         "completed": completed_count,
                         "cancelled": cancelled_count,
                         "status_breakdown": status_counts,
@@ -736,7 +644,7 @@ class AdminAllBookingsListView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, *args, **kwargs):
-        queryset = Booking.objects.select_related('user', 'partner').prefetch_related('items', 'payments').order_by('-created_at')
+        queryset = booking_queryset().order_by('-created_at')
 
         search = request.query_params.get('search', '').strip()
         if search:
@@ -754,27 +662,19 @@ class AdminAllBookingsListView(APIView):
         if partner_id:
             queryset = queryset.filter(partner_id=partner_id)
 
-        booking_status = request.query_params.get('status')
-        if booking_status and booking_status.strip().lower() not in ['all', 'all statuses', '']:
-            status_upper = booking_status.strip().upper()
-            if status_upper == 'PENDING':
-                queryset = queryset.filter(booking_status__in=['AWAITING_ADVANCE_PAYMENT', 'AWAITING_PARTNER_CONFIRMATION'])
-            elif status_upper == 'COMPLETED':
-                queryset = queryset.filter(booking_status='TEST_COMPLETED')
-            elif status_upper in ['CANCELLED', 'CANCELED']:
-                queryset = queryset.filter(booking_status__in=['CANCELLED', 'REJECTED_BY_PARTNER'])
-            else:
-                queryset = queryset.filter(booking_status__iexact=status_upper)
+        booking_status = (request.query_params.get('status') or '').strip()
+        legacy = {'PENDING': 'pending', 'COMPLETED': 'completed', 'CANCELED': 'cancelled', 'CANCELLED': 'cancelled'}
+        queryset = filter_by_status(queryset, legacy.get(booking_status.upper(), booking_status))
 
         payment_status = request.query_params.get('payment_status')
         if payment_status:
             queryset = queryset.filter(payment_status=payment_status)
 
-        serializer = BookingDetailSerializer(queryset, many=True)
+        serializer = BookingDetailSerializer(queryset, many=True, context={'audience': wf.ADMIN})
         return Response(
             {
                 "success": True,
-                "count": queryset.count(),
+                "count": len(serializer.data),
                 "bookings": serializer.data,
                 "results": serializer.data,
             },

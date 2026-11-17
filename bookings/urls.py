@@ -18,6 +18,8 @@ from .views import (
     AdminDashboardMetricsView,
     AdminAllBookingsListView,
     AdminPartnerApprovalView,
+    BookingWorkflowView,
+    PartnerBookingDetailView,
 )
 
 app_name = 'bookings'
@@ -25,6 +27,7 @@ app_name = 'bookings'
 urlpatterns = [
     # Patient Booking Flow
     path('api/bookings/price-estimate/', PriceEstimateView.as_view(), name='api_booking_price_estimate'),
+    path('api/bookings/workflow/', BookingWorkflowView.as_view(), name='api_booking_workflow'),
     path('api/bookings/', BookingListCreateView.as_view(), name='api_bookings_list_create'),
     path('api/bookings/<int:pk>/', BookingDetailView.as_view(), name='api_booking_detail_int'),
     path('api/bookings/<str:pk>/', BookingDetailView.as_view(), name='api_booking_detail_str'),
@@ -47,6 +50,8 @@ urlpatterns = [
 
     # Diagnostic Partner Dashboard
     path('api/partner/bookings/', PartnerBookingsListView.as_view(), name='api_partner_bookings_list'),
+    path('api/partner/bookings/<int:pk>/', PartnerBookingDetailView.as_view(), name='api_partner_booking_detail_int'),
+    path('api/partner/bookings/<str:pk>/', PartnerBookingDetailView.as_view(), name='api_partner_booking_detail_str'),
     path('api/partner/bookings/<int:pk>/accept/', PartnerAcceptBookingView.as_view(), name='api_partner_booking_accept_int'),
     path('api/partner/bookings/<str:pk>/accept/', PartnerAcceptBookingView.as_view(), name='api_partner_booking_accept_str'),
     path('api/partner/bookings/<int:pk>/reject/', PartnerRejectBookingView.as_view(), name='api_partner_booking_reject_int'),

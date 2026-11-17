@@ -22,7 +22,14 @@ from bookings.services import (
 
 User = get_user_model()
 
+import shutil
+import tempfile
+from django.test import override_settings
 
+TEST_MEDIA = tempfile.mkdtemp(prefix='bookings-test-media-')
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA)
 class FullApplicationFlowTests(TestCase):
     """
     Test suite verifying the 12-step Application Flow and 30%/70% payment rules.
@@ -125,6 +132,31 @@ class FullApplicationFlowTests(TestCase):
             booked_count=0,
             is_active=True
         )
+
+    # ── helpers ──
+    @staticmethod
+    def pdf(name='report.pdf', body=b'%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF'):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        return SimpleUploadedFile(name, body, content_type='application/pdf')
+
+    def run_lab_pipeline(self, booking, until='REPORT_READY'):
+        """Drive a CONFIRMED booking through the lab pipeline via the service layer."""
+        steps = [
+            ('SAMPLE_COLLECTED', {}),
+            ('SAMPLE_RECEIVED', {}),
+            ('LAB_ANALYSIS', {}),
+            ('REPORT_GENERATED', {}),
+            ('REPORT_UPLOADED', {'report_file': self.pdf()}),
+            ('REPORT_VERIFIED', {'verified_by_name': 'Dr. Meera Rao', 'verified_by_registration': 'TSMC-44120'}),
+            ('REPORT_READY', {}),
+        ]
+        for target, extra in steps:
+            _, err = partner_update_service_status(booking, self.partner_user, target, **extra)
+            self.assertIsNone(err, f"{target}: {err}")
+            if target == until:
+                break
+        booking.refresh_from_db()
+        return booking
 
     def test_step_8_price_estimate_30_70_split(self):
         """
@@ -257,12 +289,9 @@ class FullApplicationFlowTests(TestCase):
         process_advance_payment(booking)
         partner_accept_booking(booking, self.partner_user)
 
-        # Step 11: Sample collected -> Test completed
-        partner_update_service_status(booking, self.partner_user, 'SAMPLE_COLLECTED')
-        partner_update_service_status(booking, self.partner_user, 'TEST_COMPLETED')
-
-        booking.refresh_from_db()
-        self.assertEqual(booking.booking_status, 'TEST_COMPLETED')
+        # Step 11: full lab pipeline -> report released
+        booking = self.run_lab_pipeline(booking)
+        self.assertEqual(booking.booking_status, 'REPORT_READY')
         self.assertIsNotNone(booking.completed_at)
 
         # Step 12: Pay 70% balance (350.00)
@@ -288,8 +317,8 @@ class FullApplicationFlowTests(TestCase):
         booking, _ = create_booking_order(self.user, booking_payload)
         process_advance_payment(booking)
         partner_accept_booking(booking, self.partner_user)
-        partner_update_service_status(booking, self.partner_user, 'SAMPLE_COLLECTED')
-        partner_update_service_status(booking, self.partner_user, 'TEST_COMPLETED')
+        # Collector takes cash right after collection — allowed from SAMPLE_COLLECTED onwards.
+        booking = self.run_lab_pipeline(booking, until='SAMPLE_COLLECTED')
 
         payment, err = process_balance_payment(
             booking=booking,
@@ -413,18 +442,24 @@ class FullApplicationFlowTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data['booking']['booking_status'], 'CONFIRMED')
 
-        # 10. Partner Updates to Sample Collected and Test Completed
-        res = self.client.post(f'/api/partner/bookings/{booking_id}/update-status/', {'new_status': 'SAMPLE_COLLECTED'}, format='json')
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-
-        res = self.client.post(f'/api/partner/bookings/{booking_id}/update-status/', {'new_status': 'TEST_COMPLETED'}, format='json')
-        self.assertEqual(res.status_code, status.HTTP_200_OK)
-        self.assertEqual(res.data['booking']['booking_status'], 'TEST_COMPLETED')
+        # 10. Partner walks the lab pipeline over HTTP
+        url = f'/api/partner/bookings/{booking_id}/update-status/'
+        for target in ['SAMPLE_COLLECTED', 'SAMPLE_RECEIVED', 'LAB_ANALYSIS', 'REPORT_GENERATED']:
+            res = self.client.post(url, {'new_status': target}, format='json')
+            self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        res = self.client.post(f'/api/partner/bookings/{booking_id}/upload-report/', {'report_file': self.pdf()}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        res = self.client.post(url, {'new_status': 'REPORT_VERIFIED', 'verified_by_name': 'Dr. Meera Rao'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        res = self.client.post(url, {'new_status': 'REPORT_READY'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
+        self.assertEqual(res.data['booking']['booking_status'], 'REPORT_READY')
 
         # 11. Partner Dashboard Summary
         res = self.client.get('/api/partner/dashboard/summary/')
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(res.data['metrics']['tests_completed'], 1)
+        self.assertGreaterEqual(res.data['metrics']['completed_count'], 1)
 
         # 12. User Pays Remaining 70% Balance Online
         self.client.force_authenticate(user=self.user)
@@ -452,3 +487,241 @@ class FullApplicationFlowTests(TestCase):
         self.assertGreaterEqual(res.data['metrics']['bookings']['total_count'], 1)
 
 
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA)
+class LabReportPipelineTests(TestCase):
+    """Partner → Laboratory → Patient report pipeline: rules, access control, notifications, audit."""
+
+    setUp = FullApplicationFlowTests.setUp
+    pdf = staticmethod(FullApplicationFlowTests.pdf)
+    run_lab_pipeline = FullApplicationFlowTests.run_lab_pipeline
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        shutil.rmtree(TEST_MEDIA, ignore_errors=True)
+
+    def confirmed_booking(self):
+        booking, err = create_booking_order(self.user, {
+            'partner_id': self.partner.id, 'service_mode': 'CENTRE_VISIT', 'slot_id': self.slot.id,
+            'patient_type': 'SELF', 'test_ids': [self.test1.id],
+        })
+        self.assertIsNone(err)
+        process_advance_payment(booking)
+        partner_accept_booking(booking, self.partner_user)
+        booking.refresh_from_db()
+        return booking
+
+    def status_url(self, booking):
+        return f'/api/partner/bookings/{booking.booking_id}/update-status/'
+
+    # ── state machine ──
+
+    def test_full_pipeline_records_every_step_in_order(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        self.assertEqual(booking.booking_status, 'REPORT_READY')
+        self.assertIsNotNone(booking.sample_collected_at)
+        self.assertIsNotNone(booking.sample_received_at)
+        self.assertEqual(booking.report_verified_by_name, 'Dr. Meera Rao')
+        self.assertEqual(len(booking.report_file_sha256), 64)
+        self.assertIsNotNone(booking.report_released_at)
+        trail = list(booking.status_logs.values_list('to_status', flat=True))
+        self.assertEqual(trail, [
+            'AWAITING_PARTNER_CONFIRMATION', 'CONFIRMED', 'SAMPLE_COLLECTED', 'SAMPLE_RECEIVED', 'LAB_ANALYSIS',
+            'REPORT_GENERATED', 'REPORT_UPLOADED', 'REPORT_VERIFIED', 'REPORT_READY',
+        ])
+
+    def test_steps_cannot_be_skipped(self):
+        booking = self.confirmed_booking()
+        _, err = partner_update_service_status(booking, self.partner_user, 'LAB_ANALYSIS')
+        self.assertIn('Next allowed step: Sample Collected', err)
+        booking.refresh_from_db()
+        self.assertEqual(booking.booking_status, 'CONFIRMED')
+
+    def test_legacy_test_completed_is_rejected_with_guidance(self):
+        booking = self.confirmed_booking()
+        self.client.force_authenticate(self.partner_user)
+        res = self.client.post(self.status_url(booking), {'new_status': 'TEST_COMPLETED'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['code'], 'legacy_status')
+        self.assertEqual(res.data['allowed_next_statuses'], ['SAMPLE_COLLECTED'])
+
+    def test_workflow_requires_confirmed_booking(self):
+        booking, _ = create_booking_order(self.user, {
+            'partner_id': self.partner.id, 'service_mode': 'CENTRE_VISIT', 'slot_id': self.slot.id,
+            'patient_type': 'SELF', 'test_ids': [self.test1.id],
+        })
+        _, err = partner_update_service_status(booking, self.partner_user, 'SAMPLE_COLLECTED')
+        self.assertIn('must be confirmed', err)
+
+    def test_stale_expected_status_returns_409(self):
+        booking = self.confirmed_booking()
+        self.client.force_authenticate(self.partner_user)
+        res = self.client.post(self.status_url(booking), {'new_status': 'SAMPLE_COLLECTED', 'expected_status': 'CONFIRMED'}, format='json')
+        self.assertEqual(res.status_code, 200)
+        # A second tab still thinks the booking is CONFIRMED.
+        res = self.client.post(self.status_url(booking), {'new_status': 'SAMPLE_COLLECTED', 'expected_status': 'CONFIRMED'}, format='json')
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data['code'], 'stale_status')
+
+    def test_status_aliases_are_accepted(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='SAMPLE_COLLECTED')
+        self.client.force_authenticate(self.partner_user)
+        res = self.client.post(self.status_url(booking), {'status': 'sample received at lab'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['booking']['booking_status'], 'SAMPLE_RECEIVED')
+
+    # ── report upload / verification / release ──
+
+    def test_upload_rejects_non_pdf_and_fake_pdf(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='REPORT_GENERATED')
+        self.client.force_authenticate(self.partner_user)
+        url = f'/api/partner/bookings/{booking.booking_id}/upload-report/'
+        res = self.client.post(url, {'report_file': SimpleUploadedFile('r.png', b'\x89PNG', content_type='image/png')}, format='multipart')
+        self.assertEqual(res.data['code'], 'report_not_pdf')
+        res = self.client.post(url, {'report_file': SimpleUploadedFile('r.pdf', b'not really a pdf', content_type='application/pdf')}, format='multipart')
+        self.assertEqual(res.data['code'], 'report_not_pdf')
+        res = self.client.post(url, {}, format='multipart')
+        self.assertEqual(res.data['code'], 'report_file_required')
+        booking.refresh_from_db()
+        self.assertEqual(booking.booking_status, 'REPORT_GENERATED')
+
+    def test_upload_from_lab_analysis_records_report_generated(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='LAB_ANALYSIS')
+        self.client.force_authenticate(self.partner_user)
+        res = self.client.post(f'/api/partner/bookings/{booking.booking_id}/upload-report/', {'report_file': self.pdf()}, format='multipart')
+        self.assertEqual(res.status_code, 200, res.data)
+        trail = [h['to_status'] for h in res.data['booking']['status_history']]
+        self.assertEqual(trail[-2:], ['REPORT_GENERATED', 'REPORT_UPLOADED'])
+        self.assertFalse(Notification.objects.filter(booking=booking, notification_type='REPORT_READY').exists())
+
+    def test_verification_requires_verifier_name(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='REPORT_UPLOADED')
+        _, err = partner_update_service_status(booking, self.partner_user, 'REPORT_VERIFIED')
+        self.assertIn('authorised person', err)
+
+    def test_release_requires_verification(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='REPORT_UPLOADED')
+        _, err = partner_update_service_status(booking, self.partner_user, 'REPORT_READY')
+        self.assertIsNotNone(err)
+        booking.refresh_from_db()
+        self.assertEqual(booking.booking_status, 'REPORT_UPLOADED')
+
+    def test_reupload_clears_verification_and_send_back_needs_reason(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='REPORT_UPLOADED')
+        _, err = partner_update_service_status(booking, self.partner_user, 'REPORT_GENERATED')
+        self.assertIn('at least 5 characters', err)
+        _, err = partner_update_service_status(booking, self.partner_user, 'REPORT_GENERATED', notes='Wrong patient age on page 1')
+        self.assertIsNone(err)
+        _, err = partner_update_service_status(booking, self.partner_user, 'REPORT_UPLOADED', report_file=self.pdf('v2.pdf'))
+        self.assertIsNone(err)
+        booking.refresh_from_db()
+        self.assertEqual(booking.booking_status, 'REPORT_UPLOADED')
+        self.assertIsNone(booking.report_verified_at)
+
+    # ── notifications ──
+
+    def test_patient_notified_only_on_patient_facing_steps_and_push_on_release(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        types = list(Notification.objects.filter(user=self.user, booking=booking).values_list('notification_type', flat=True))
+        for t in ('SAMPLE_COLLECTED', 'SAMPLE_RECEIVED', 'LAB_ANALYSIS', 'REPORT_READY'):
+            self.assertIn(t, types)
+        ready = Notification.objects.get(user=self.user, booking=booking, notification_type='REPORT_READY')
+        self.assertIn(ready.push_status, ('PENDING', 'SKIPPED', 'SENT'))  # on_commit never fires inside TestCase
+        self.assertIsNotNone(booking.patient_notified_at)
+
+    # ── access control & download ──
+
+    def test_patient_cannot_see_or_download_report_before_release(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='REPORT_VERIFIED')
+        self.client.force_authenticate(self.user)
+        detail = self.client.get(f'/api/bookings/{booking.booking_id}/').data['booking']
+        self.assertFalse(detail['has_report'])
+        self.assertIsNone(detail['report_download_url'])
+        self.assertEqual(detail['report_verified_by_name'], '')
+        res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/')
+        self.assertEqual(res.status_code, 403)
+        self.assertEqual(res.data['code'], 'report_not_available')
+
+    def test_partner_can_preview_report_before_release(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='REPORT_UPLOADED')
+        self.client.force_authenticate(self.partner_user)
+        res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/?inline=1')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(b''.join(res.streaming_content).startswith(b'%PDF-'))
+        booking.refresh_from_db()
+        self.assertEqual(booking.report_download_count, 0)  # partner previews are not patient downloads
+
+    def test_patient_download_marks_report_downloaded_once(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        self.client.force_authenticate(self.user)
+        for _ in range(2):
+            res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/')
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res['Cache-Control'], 'private, no-store')
+            b''.join(res.streaming_content)
+        booking.refresh_from_db()
+        self.assertEqual(booking.booking_status, 'REPORT_DOWNLOADED')
+        self.assertEqual(booking.report_download_count, 2)
+        self.assertEqual(booking.status_logs.filter(to_status='REPORT_DOWNLOADED').count(), 1)
+
+    def test_strangers_and_anonymous_users_cannot_download(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        stranger = User.objects.create_user(phone_number='+919111122222', is_phone_verified=True)
+        self.client.force_authenticate(stranger)
+        self.assertEqual(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/').status_code, 404)
+        self.client.force_authenticate(None)
+        self.assertIn(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/').status_code, (401, 403))
+
+    @override_settings(REPORT_REQUIRES_FULL_PAYMENT=True)
+    def test_optional_payment_gate_on_download(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        self.client.force_authenticate(self.user)
+        res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/')
+        self.assertEqual(res.status_code, 403)
+        process_balance_payment(booking)
+        self.assertEqual(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/').status_code, 200)
+
+    # ── cancellation & payments ──
+
+    def test_patient_cannot_cancel_after_sample_collection(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='SAMPLE_COLLECTED')
+        self.client.force_authenticate(self.user)
+        res = self.client.post(f'/api/bookings/{booking.booking_id}/cancel/', {'reason': 'Changed my mind'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('already been collected', res.data['message'])
+
+    def test_cancel_accepts_reason_alias_refunds_and_frees_slot(self):
+        booking = self.confirmed_booking()
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 1)
+        self.client.force_authenticate(self.user)
+        res = self.client.post(f'/api/bookings/{booking.booking_id}/cancel/', {'reason': 'Schedule conflict'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['booking']['booking_status'], 'CANCELLED')
+        self.assertEqual(res.data['booking']['payment_status'], 'REFUNDED')
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 0)
+
+    def test_balance_not_payable_before_collection_or_after_cancel(self):
+        booking = self.confirmed_booking()
+        _, err = process_balance_payment(booking)
+        self.assertIn('once your sample has been collected', err)
+
+    # ── listing ──
+
+    def test_partner_list_supports_status_groups(self):
+        a = self.run_lab_pipeline(self.confirmed_booking(), until='LAB_ANALYSIS')
+        self.client.force_authenticate(self.partner_user)
+        ids = [b['booking_id'] for b in self.client.get('/api/partner/bookings/?status=in_lab').data['bookings']]
+        self.assertEqual(ids, [a.booking_id])
+        self.assertEqual(self.client.get('/api/partner/bookings/?status=completed').data['count'], 0)
+        nxt = self.client.get(f'/api/partner/bookings/{a.booking_id}/').data['booking']['next_actions']
+        self.assertEqual([n['status'] for n in nxt], ['REPORT_GENERATED'])
+
+    def test_workflow_endpoint_describes_pipeline(self):
+        res = self.client.get('/api/bookings/workflow/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['pipeline'][-1]['status'], 'REPORT_DOWNLOADED')

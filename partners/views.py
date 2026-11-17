@@ -703,11 +703,26 @@ class PartnerDashboardSummaryView(APIView):
         if not partner:
             return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
 
+        from django.db.models import Count, Sum
+        from django.utils import timezone
+        from bookings import workflow as wf
+
         bookings = partner.bookings.all()
-        incoming = bookings.filter(booking_status='AWAITING_PARTNER_CONFIRMATION').count()
-        confirmed = bookings.filter(booking_status='CONFIRMED').count()
-        in_progress = bookings.filter(booking_status='SAMPLE_COLLECTED').count()
-        completed = bookings.filter(booking_status='TEST_COMPLETED').count()
+        by_status = dict(bookings.values('booking_status').annotate(n=Count('id')).values_list('booking_status', 'n'))
+
+        def count_of(statuses):
+            return sum(by_status.get(s, 0) for s in statuses)
+
+        incoming = by_status.get(wf.AWAITING_PARTNER_CONFIRMATION, 0)
+        confirmed = by_status.get(wf.CONFIRMED, 0)
+        in_lab = count_of(wf.IN_LAB)
+        awaiting_verification = by_status.get(wf.REPORT_UPLOADED, 0)
+        awaiting_release = by_status.get(wf.REPORT_VERIFIED, 0)
+        completed = count_of(wf.COMPLETED)
+        live = bookings.exclude(booking_status__in=wf.VOID)
+        money = live.aggregate(adv=Sum('advance_amount_paid'), due=Sum('balance_amount_due'), paid=Sum('balance_amount_paid'))
+        outstanding = max((money['due'] or 0) - (money['paid'] or 0), 0)
+        today = bookings.filter(booking_date=timezone.localdate()).exclude(booking_status__in=wf.VOID).count()
 
         return Response(
             {
@@ -717,12 +732,25 @@ class PartnerDashboardSummaryView(APIView):
                     "centre_name": partner.centre_name,
                     "status": partner.status,
                 },
+                "partner_name": partner.centre_name,
                 "metrics": {
+                    # legacy keys
                     "incoming_requests_awaiting_confirmation": incoming,
                     "confirmed_upcoming_bookings": confirmed,
-                    "samples_collected_in_progress": in_progress,
+                    "samples_collected_in_progress": in_lab,
                     "tests_completed": completed,
                     "total_bookings": bookings.count(),
+                    # keys read by the partner portal
+                    "pending_confirmation_count": incoming,
+                    "confirmed_count": confirmed,
+                    "sample_collection_count": in_lab,
+                    "completed_count": completed,
+                    "awaiting_verification_count": awaiting_verification,
+                    "awaiting_release_count": awaiting_release,
+                    "total_advance_collected": float(money['adv'] or 0),
+                    "outstanding_balance": float(outstanding),
+                    "today_count": today,
+                    "status_breakdown": {s: by_status.get(s, 0) for s in wf.PIPELINE},
                 }
             },
             status=status.HTTP_200_OK

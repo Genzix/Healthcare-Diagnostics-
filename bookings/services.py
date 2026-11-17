@@ -1,26 +1,325 @@
+import hashlib
 import uuid
 from decimal import Decimal
-from django.utils import timezone
-from django.db import transaction
 
-from .models import Booking, BookingItem, Payment, Notification
+from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
+
+from . import workflow as wf
+from .models import Booking, BookingItem, BookingStatusLog, Payment, Notification
+from .notifications import notify
 from diagnostics.models import DiagnosticTest, HealthPackage
 from partners.models import DiagnosticPartner, PartnerSlot, PartnerTestPricing, PartnerPackagePricing
 from accounts.models import FamilyMember
 
 
-def send_system_notification(user, notification_type, title, message, booking=None):
-    """
-    Creates a notification log entry for the user.
-    """
-    return Notification.objects.create(
-        user=user,
+# =====================================================================
+# Errors, notifications, audit log
+# =====================================================================
+
+class WorkflowError(Exception):
+    """A rejected lifecycle action. `http_status` lets views answer 400 / 403 / 409 precisely."""
+
+    def __init__(self, message, code='invalid', http_status=400, allowed=()):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.http_status = http_status
+        self.allowed = tuple(allowed)
+
+
+def send_system_notification(user, notification_type, title, message, booking=None, push=False):
+    """Backward-compatible wrapper around notifications.notify()."""
+    return notify(user, notification_type, title, message, booking=booking, push=push)
+
+
+def log_status(booking, from_status, to_status, actor=None, actor_role=wf.SYSTEM, notes='', metadata=None):
+    return BookingStatusLog.objects.create(
         booking=booking,
-        notification_type=notification_type,
-        title=title,
-        message=message
+        from_status=from_status or '',
+        to_status=to_status,
+        actor=actor if getattr(actor, 'is_authenticated', False) else None,
+        actor_role=actor_role,
+        notes=(notes or '').strip(),
+        metadata=metadata or {},
     )
 
+
+def _lock(booking):
+    """Re-read the row under SELECT … FOR UPDATE so concurrent clicks serialise."""
+    return Booking.objects.select_for_update().select_related('partner', 'user').get(pk=booking.pk)
+
+
+def _sync(target, source):
+    """Copy the locked row's state back onto the caller's instance."""
+    for f in source._meta.concrete_fields:
+        setattr(target, f.attname, getattr(source, f.attname))
+    return target
+
+
+# =====================================================================
+# Report file validation
+# =====================================================================
+
+REPORT_MAX_BYTES = int(getattr(settings, 'REPORT_MAX_UPLOAD_MB', 10)) * 1024 * 1024
+
+
+def validate_report_pdf(upload):
+    """
+    Accept only a real PDF: extension, declared type and the %PDF- magic bytes
+    must agree. Returns {'size', 'sha256', 'name'}; raises WorkflowError.
+    """
+    if not upload:
+        raise WorkflowError("Attach the laboratory-generated report as a PDF file.", code='report_file_required')
+    name = getattr(upload, 'name', '') or 'report.pdf'
+    size = getattr(upload, 'size', None) or 0
+    if not name.lower().endswith('.pdf'):
+        raise WorkflowError("Only PDF reports are accepted.", code='report_not_pdf')
+    content_type = (getattr(upload, 'content_type', '') or '').lower()
+    if content_type and content_type not in ('application/pdf', 'application/x-pdf', 'application/octet-stream'):
+        raise WorkflowError("Only PDF reports are accepted.", code='report_not_pdf')
+    if size <= 0:
+        raise WorkflowError("The uploaded report is empty.", code='report_empty')
+    if size > REPORT_MAX_BYTES:
+        raise WorkflowError(f"Report is too large ({size / 1048576:.1f} MB). Maximum is {REPORT_MAX_BYTES // 1048576} MB.", code='report_too_large')
+
+    digest = hashlib.sha256()
+    head = b''
+    upload.seek(0)
+    for chunk in upload.chunks():
+        if not head:
+            head = chunk[:5]
+        digest.update(chunk)
+    upload.seek(0)
+    if head != b'%PDF-':
+        raise WorkflowError("This file is not a valid PDF document.", code='report_not_pdf')
+    return {'size': size, 'sha256': digest.hexdigest(), 'name': name}
+
+
+# =====================================================================
+# Lab workflow engine
+# =====================================================================
+
+def _patient_message(step, booking):
+    partner = booking.partner.centre_name if booking.partner_id else 'your diagnostic centre'
+    msg = step.notify_message.format(booking_id=booking.booking_id, partner=partner)
+    if booking.patient_type == 'FAMILY_MEMBER' and booking.patient_name:
+        msg = f"{msg} (Patient: {booking.patient_name})"
+    return msg
+
+
+@transaction.atomic
+def transition_booking(
+    booking: Booking,
+    target: str,
+    actor=None,
+    actor_role: str = wf.PARTNER,
+    notes: str = '',
+    expected_status: str = None,
+    report_file=None,
+    report_name: str = '',
+    report_notes: str = None,
+    verified_by_name: str = '',
+    verified_by_registration: str = '',
+):
+    """
+    Move a booking one step along the lab pipeline. Raises WorkflowError.
+
+    - Row-locked: two staff clicking at once cannot double-advance.
+    - `expected_status` (optional) gives optimistic concurrency: if the booking
+      moved since the client loaded it, answer 409 instead of acting on stale UI.
+    - Each step's requirements (PDF on upload, verifier on verification, notes on
+      send-back, verified file before release) are enforced here, not in the UI.
+    """
+    target = wf.normalize(target)
+    locked = _lock(booking)
+    current = locked.booking_status
+
+    if expected_status and wf.normalize(expected_status) != current:
+        raise WorkflowError(
+            f"This booking is now '{wf.LABELS.get(current, current)}'. Refresh to see the latest status.",
+            code='stale_status', http_status=409,
+        )
+    if target == wf.TEST_COMPLETED:
+        raise WorkflowError(
+            "'Test Completed' has been replaced by the report pipeline: upload, verify and release the report instead.",
+            code='legacy_status', allowed=[s['status'] for s in wf.next_steps(current, actor_role)],
+        )
+
+    result = wf.check(current, target, actor_role)
+    if not result.ok:
+        raise WorkflowError(result.error, code=result.code,
+                            http_status=403 if result.code == 'forbidden_actor' else 400, allowed=result.allowed)
+    step = result.step
+    now = timezone.now()
+    notes = (notes or '').strip()
+    metadata = {}
+    fields = {'booking_status', 'status_changed_at', 'updated_at'}
+
+    if step.requires_notes and len(notes) < 5:
+        raise WorkflowError("Explain what needs correcting (at least 5 characters).", code='notes_required')
+
+    # ── step-specific rules & side effects ──
+    if target == wf.SAMPLE_COLLECTED:
+        locked.sample_collected_at = now
+        fields.add('sample_collected_at')
+
+    elif target == wf.SAMPLE_RECEIVED:
+        locked.sample_received_at = now
+        fields.add('sample_received_at')
+
+    elif target == wf.REPORT_GENERATED and current == wf.REPORT_UPLOADED:
+        # Sent back by the verifier: the uploaded file is no longer trusted.
+        locked.report_verified_by_name = ''
+        locked.report_verified_by_registration = ''
+        locked.report_verified_at = None
+        fields.update({'report_verified_by_name', 'report_verified_by_registration', 'report_verified_at'})
+        metadata['sent_back'] = True
+
+    elif target == wf.REPORT_UPLOADED:
+        meta = validate_report_pdf(report_file)
+        if locked.report_file:
+            metadata['replaced_sha256'] = locked.report_file_sha256
+        locked.report_file = report_file
+        locked.report_name = (report_name or meta['name'])[:255]
+        locked.report_file_size = meta['size']
+        locked.report_file_sha256 = meta['sha256']
+        locked.report_uploaded_at = now
+        # A new file invalidates any earlier verification.
+        locked.report_verified_by_name = ''
+        locked.report_verified_by_registration = ''
+        locked.report_verified_at = None
+        fields.update({'report_file', 'report_name', 'report_file_size', 'report_file_sha256', 'report_uploaded_at',
+                       'report_verified_by_name', 'report_verified_by_registration', 'report_verified_at'})
+        metadata.update(sha256=meta['sha256'], size=meta['size'], reupload=current == wf.REPORT_UPLOADED)
+
+    elif target == wf.REPORT_VERIFIED:
+        name = (verified_by_name or '').strip()
+        if len(name) < 3:
+            raise WorkflowError("Enter the name of the authorised person verifying this report.", code='verifier_required')
+        if not locked.report_file:
+            raise WorkflowError("Upload the report PDF before verifying it.", code='report_file_required')
+        locked.report_verified_by_name = name[:150]
+        locked.report_verified_by_registration = (verified_by_registration or '').strip()[:60]
+        locked.report_verified_at = now
+        fields.update({'report_verified_by_name', 'report_verified_by_registration', 'report_verified_at'})
+        metadata.update(verified_by=name, registration=locked.report_verified_by_registration,
+                        sha256=locked.report_file_sha256)
+
+    elif target == wf.REPORT_READY:
+        if not locked.report_file or not locked.report_verified_at:
+            raise WorkflowError("Only an uploaded and verified report can be released.", code='report_not_verified')
+        locked.report_released_at = now
+        locked.patient_notified_at = now
+        locked.completed_at = locked.completed_at or now
+        fields.update({'report_released_at', 'patient_notified_at', 'completed_at'})
+
+    if report_notes is not None and report_notes.strip():
+        locked.report_notes = report_notes.strip()
+        fields.add('report_notes')
+
+    locked.booking_status = target
+    locked.status_changed_at = now
+    locked.save(update_fields=sorted(fields))
+    log_status(locked, current, target, actor=actor, actor_role=actor_role, notes=notes, metadata=metadata)
+
+    if step.notify_type:
+        notify(locked.user, step.notify_type, step.notify_title, _patient_message(step, locked), booking=locked, push=step.push)
+
+    return _sync(booking, locked)
+
+
+@transaction.atomic
+def upload_report(booking, actor, report_file, actor_role=wf.PARTNER, report_name='', report_notes='', notes='', expected_status=None):
+    """
+    Upload (or replace) the lab PDF. Convenience: from LAB_ANALYSIS the
+    REPORT_GENERATED step is recorded first, so the audit trail stays complete.
+    """
+    validate_report_pdf(report_file)  # fail fast, before any status moves
+    locked = _lock(booking)
+    if expected_status and wf.normalize(expected_status) != locked.booking_status:
+        raise WorkflowError("This booking changed since you opened it. Refresh and try again.", code='stale_status', http_status=409)
+    if locked.booking_status == wf.LAB_ANALYSIS:
+        transition_booking(booking, wf.REPORT_GENERATED, actor=actor, actor_role=actor_role, notes='Recorded automatically on report upload.')
+    return transition_booking(
+        booking, wf.REPORT_UPLOADED, actor=actor, actor_role=actor_role, notes=notes,
+        report_file=report_file, report_name=report_name, report_notes=report_notes,
+    )
+
+
+@transaction.atomic
+def record_report_download(booking, user):
+    """Patient opened the report: count it; the first open moves the booking to REPORT_DOWNLOADED."""
+    locked = _lock(booking)
+    now = timezone.now()
+    locked.report_download_count = (locked.report_download_count or 0) + 1
+    locked.report_last_downloaded_at = now
+    first = locked.report_first_downloaded_at is None
+    if first:
+        locked.report_first_downloaded_at = now
+    locked.save(update_fields=['report_download_count', 'report_last_downloaded_at', 'report_first_downloaded_at', 'updated_at'])
+    _sync(booking, locked)
+    if locked.booking_status in (wf.REPORT_READY, wf.TEST_COMPLETED):
+        transition_booking(booking, wf.REPORT_DOWNLOADED, actor=user, actor_role=wf.PATIENT, notes='Patient downloaded the report.')
+    return booking
+
+
+def report_access(booking, user, partner=None):
+    """
+    Who may fetch the report file:
+      - staff/admin: always (if a file exists)
+      - the booking's partner: once uploaded (needed to verify it)
+      - the patient account: only after release (and, if configured, after full payment)
+    Returns (allowed: bool, audience: str, reason: str).
+    """
+    if not booking.report_file:
+        return False, '', "The report has not been uploaded yet."
+    if getattr(user, 'is_staff', False) or getattr(user, 'role', '') == 'ADMIN':
+        return True, wf.ADMIN, ''
+    if partner is not None and booking.partner_id == partner.pk:
+        return True, wf.PARTNER, ''
+    if booking.user_id == getattr(user, 'pk', None):
+        if booking.booking_status not in wf.REPORT_RELEASED:
+            return False, wf.PATIENT, "Your report is still being processed. You'll be notified when it is ready."
+        if getattr(settings, 'REPORT_REQUIRES_FULL_PAYMENT', False) and booking.payment_status != 'FULLY_PAID':
+            return False, wf.PATIENT, "Please pay the remaining balance to download your report."
+        return True, wf.PATIENT, ''
+    return False, '', "Booking not found."
+
+
+def partner_update_service_status(
+    booking: Booking,
+    partner_user,
+    new_status: str,
+    report_file=None,
+    report_notes: str = "",
+    report_name: str = "",
+    notes: str = "",
+    verified_by_name: str = "",
+    verified_by_registration: str = "",
+    expected_status: str = None,
+):
+    """Backward-compatible (booking, error) wrapper over transition_booking()."""
+    try:
+        target = wf.normalize(new_status)
+        if target == wf.REPORT_UPLOADED:
+            return upload_report(booking, partner_user, report_file, report_name=report_name,
+                                 report_notes=report_notes, notes=notes, expected_status=expected_status), None
+        return transition_booking(
+            booking, target, actor=partner_user, actor_role=wf.PARTNER, notes=notes,
+            expected_status=expected_status, report_file=report_file, report_name=report_name,
+            report_notes=report_notes, verified_by_name=verified_by_name,
+            verified_by_registration=verified_by_registration,
+        ), None
+    except WorkflowError as exc:
+        return None, exc.message
+
+
+
+# =====================================================================
+# Pricing & booking creation
+# =====================================================================
 
 def calculate_booking_pricing(partner: DiagnosticPartner, test_ids: list, package_ids: list, service_mode: str, pincode: str = None):
     """
@@ -231,22 +530,44 @@ def create_booking_order(user, data: dict):
     return booking, None
 
 
+
+# =====================================================================
+# Payments, confirmation, cancellation
+# =====================================================================
+
+def _ref(prefix):
+    return f"{prefix}-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+
+def _release_slot(booking):
+    if booking.slot_id:
+        slot = PartnerSlot.objects.select_for_update().get(pk=booking.slot_id)
+        if slot.booked_count > 0:
+            slot.booked_count -= 1
+            slot.save(update_fields=['booked_count'])
+
+
 @transaction.atomic
 def process_advance_payment(booking: Booking, payment_mode='ONLINE', gateway_transaction_id=None):
     """
-    Processes the 30% advance payment.
-    Rule: After payment, status becomes 'AWAITING_PARTNER_CONFIRMATION'.
-    Do NOT label confirmed yet until partner explicitly accepts.
+    30% advance → AWAITING_PARTNER_CONFIRMATION. The slot seat is claimed here
+    under a row lock, so two patients cannot pay into the last seat.
     """
-    if booking.booking_status != 'AWAITING_ADVANCE_PAYMENT':
-        return None, f"Booking cannot accept advance payment in current status: {booking.booking_status}."
+    locked = _lock(booking)
+    if locked.booking_status != wf.AWAITING_ADVANCE_PAYMENT:
+        return None, f"Booking cannot accept advance payment in current status: {locked.booking_status}."
 
-    advance_due = booking.advance_amount_due
+    if locked.slot_id:
+        slot = PartnerSlot.objects.select_for_update().get(pk=locked.slot_id)
+        if not slot.is_available:
+            return None, "This time slot filled up before your payment completed. Please choose another slot."
+        slot.booked_count += 1
+        slot.save(update_fields=['booked_count'])
 
-    # Generate Payment Record
+    advance_due = locked.advance_amount_due
     payment = Payment.objects.create(
-        payment_id=f"PAY-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
-        booking=booking,
+        payment_id=_ref('PAY'),
+        booking=locked,
         payment_type='ADVANCE_30',
         amount=advance_due,
         payment_mode=payment_mode,
@@ -254,212 +575,120 @@ def process_advance_payment(booking: Booking, payment_mode='ONLINE', gateway_tra
         gateway_transaction_id=gateway_transaction_id or f"TXN-{uuid.uuid4().hex[:8].upper()}",
     )
 
-    # Increment slot booked count
-    if booking.slot:
-        booking.slot.booked_count += 1
-        booking.slot.save(update_fields=['booked_count'])
+    locked.advance_amount_paid = advance_due
+    locked.booking_status = wf.AWAITING_PARTNER_CONFIRMATION
+    locked.payment_status = 'ADVANCE_PAID'
+    locked.status_changed_at = timezone.now()
+    locked.save(update_fields=['advance_amount_paid', 'booking_status', 'payment_status', 'status_changed_at', 'updated_at'])
+    log_status(locked, wf.AWAITING_ADVANCE_PAYMENT, wf.AWAITING_PARTNER_CONFIRMATION, actor=locked.user,
+               actor_role=wf.PATIENT, notes='Advance payment received.', metadata={'payment_id': payment.payment_id})
+    _sync(booking, locked)
 
-    # Update Booking status
-    booking.advance_amount_paid = advance_due
-    booking.booking_status = 'AWAITING_PARTNER_CONFIRMATION'
-    booking.payment_status = 'ADVANCE_PAID'
-    booking.save(update_fields=['advance_amount_paid', 'booking_status', 'payment_status', 'updated_at'])
-
-    # Send Notification to User
-    send_system_notification(
-        user=booking.user,
-        booking=booking,
-        notification_type='PAYMENT_RESULT',
-        title='Advance Payment (30%) Received',
-        message=(
-            f"30% advance payment of ₹{advance_due} received for booking {booking.booking_id}. "
-            "Your booking request is now awaiting partner confirmation."
-        )
-    )
-
-    # Notify Partner user if exists
-    if booking.partner.user:
-        send_system_notification(
-            user=booking.partner.user,
-            booking=booking,
-            notification_type='BOOKING_REMINDER',
-            title='New Incoming Booking Request',
-            message=f"New booking request {booking.booking_id} from {booking.patient_name} awaiting your confirmation."
-        )
-
+    notify(locked.user, 'PAYMENT_RESULT', 'Advance Payment (30%) Received',
+           f"30% advance payment of ₹{advance_due} received for booking {locked.booking_id}. "
+           "Your booking request is now awaiting partner confirmation.", booking=locked)
+    if locked.partner.user_id:
+        notify(locked.partner.user, 'BOOKING_REMINDER', 'New Incoming Booking Request',
+               f"New booking request {locked.booking_id} from {locked.patient_name} awaiting your confirmation.",
+               booking=locked, push=True)
     return payment, None
 
 
 @transaction.atomic
 def partner_accept_booking(booking: Booking, partner_user):
-    """
-    Diagnostic partner accepts booking request -> status becomes CONFIRMED.
-    """
-    if booking.booking_status != 'AWAITING_PARTNER_CONFIRMATION':
+    locked = _lock(booking)
+    if locked.booking_status != wf.AWAITING_PARTNER_CONFIRMATION:
         return None, "Only bookings awaiting partner confirmation can be accepted."
 
-    booking.booking_status = 'CONFIRMED'
-    booking.confirmed_at = timezone.now()
-    booking.save(update_fields=['booking_status', 'confirmed_at', 'updated_at'])
+    now = timezone.now()
+    locked.booking_status = wf.CONFIRMED
+    locked.confirmed_at = now
+    locked.status_changed_at = now
+    locked.save(update_fields=['booking_status', 'confirmed_at', 'status_changed_at', 'updated_at'])
+    log_status(locked, wf.AWAITING_PARTNER_CONFIRMATION, wf.CONFIRMED, actor=partner_user, actor_role=wf.PARTNER)
+    _sync(booking, locked)
 
-    # Notify User
-    send_system_notification(
-        user=booking.user,
-        booking=booking,
-        notification_type='PARTNER_CONFIRMATION',
-        title='Booking Confirmed by Partner Centre',
-        message=(
-            f"Your booking {booking.booking_id} has been confirmed by {booking.partner.centre_name} "
-            f"for {booking.booking_date} at {booking.slot_start_time.strftime('%H:%M')}."
-        )
-    )
-
+    notify(locked.user, 'PARTNER_CONFIRMATION', 'Booking Confirmed by Partner Centre',
+           f"Your booking {locked.booking_id} has been confirmed by {locked.partner.centre_name} "
+           f"for {locked.booking_date} at {locked.slot_start_time.strftime('%H:%M')}.", booking=locked, push=True)
     return booking, None
+
+
+def _refund_advance(locked, note):
+    if locked.advance_amount_paid > Decimal('0.00') and not locked.payments.filter(payment_type='REFUND').exists():
+        Payment.objects.create(
+            payment_id=_ref('REF'),
+            booking=locked,
+            payment_type='REFUND',
+            amount=locked.advance_amount_paid,
+            payment_mode='ONLINE',
+            status='SUCCESS',
+            gateway_transaction_id=f"REFUND-TXN-{uuid.uuid4().hex[:8].upper()}",
+        )
+        locked.payment_status = 'REFUNDED'
+        return True
+    return False
 
 
 @transaction.atomic
 def partner_reject_booking(booking: Booking, partner_user, reason: str):
-    """
-    Diagnostic partner rejects request -> status becomes REJECTED_BY_PARTNER,
-    slot is freed, advance refund process is recorded.
-    """
-    if booking.booking_status != 'AWAITING_PARTNER_CONFIRMATION':
+    locked = _lock(booking)
+    if locked.booking_status != wf.AWAITING_PARTNER_CONFIRMATION:
         return None, "Only bookings awaiting partner confirmation can be rejected."
 
-    booking.booking_status = 'REJECTED_BY_PARTNER'
-    booking.partner_rejection_reason = reason
-    booking.cancelled_by = 'PARTNER'
-    booking.cancellation_time = timezone.now()
-    booking.payment_status = 'REFUNDED'
-    booking.save(update_fields=[
-        'booking_status', 'partner_rejection_reason', 'cancelled_by',
-        'cancellation_time', 'payment_status', 'updated_at'
-    ])
+    now = timezone.now()
+    previous = locked.booking_status
+    locked.booking_status = wf.REJECTED_BY_PARTNER
+    locked.partner_rejection_reason = reason
+    locked.cancelled_by = 'PARTNER'
+    locked.cancellation_time = now
+    locked.status_changed_at = now
+    _refund_advance(locked, reason)
+    locked.save(update_fields=['booking_status', 'partner_rejection_reason', 'cancelled_by',
+                               'cancellation_time', 'payment_status', 'status_changed_at', 'updated_at'])
+    _release_slot(locked)
+    log_status(locked, previous, wf.REJECTED_BY_PARTNER, actor=partner_user, actor_role=wf.PARTNER, notes=reason)
+    _sync(booking, locked)
 
-    # Free Slot capacity
-    if booking.slot and booking.slot.booked_count > 0:
-        booking.slot.booked_count -= 1
-        booking.slot.save(update_fields=['booked_count'])
-
-    # Create Refund Record
-    Payment.objects.create(
-        payment_id=f"REF-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
-        booking=booking,
-        payment_type='REFUND',
-        amount=booking.advance_amount_paid,
-        payment_mode='ONLINE',
-        status='SUCCESS',
-        gateway_transaction_id=f"REFUND-TXN-{uuid.uuid4().hex[:8].upper()}",
-    )
-
-    # Notify User
-    send_system_notification(
-        user=booking.user,
-        booking=booking,
-        notification_type='PARTNER_REJECTION',
-        title='Booking Rejected by Partner Centre',
-        message=(
-            f"Your booking {booking.booking_id} could not be confirmed by {booking.partner.centre_name}. "
-            f"Reason: {reason}. Full refund of advance payment ₹{booking.advance_amount_paid} has been processed."
-        )
-    )
-
+    notify(locked.user, 'PARTNER_REJECTION', 'Booking Rejected by Partner Centre',
+           f"Your booking {locked.booking_id} could not be confirmed by {locked.partner.centre_name}. "
+           f"Reason: {reason}. Full refund of advance payment ₹{locked.advance_amount_paid} has been processed.",
+           booking=locked, push=True)
     return booking, None
 
 
 @transaction.atomic
-def partner_update_service_status(
-    booking: Booking,
-    partner_user,
-    new_status: str,
-    report_file=None,
-    report_notes: str = "",
-    report_name: str = ""
-):
-    """
-    Updates status through the diagnostic lifecycle:
-    CONFIRMED -> SAMPLE_COLLECTED -> LAB_ANALYSIS -> REPORT_READY -> TEST_COMPLETED.
-    Allows report upload and dispatches 1MinDoc branded notifications to the patient.
-    """
-    allowed_transitions = {
-        'CONFIRMED': ['SAMPLE_COLLECTED', 'LAB_ANALYSIS', 'REPORT_READY', 'TEST_COMPLETED'],
-        'SAMPLE_COLLECTED': ['LAB_ANALYSIS', 'REPORT_READY', 'TEST_COMPLETED', 'SAMPLE_COLLECTED'],
-        'LAB_ANALYSIS': ['REPORT_READY', 'TEST_COMPLETED', 'LAB_ANALYSIS'],
-        'REPORT_READY': ['TEST_COMPLETED', 'REPORT_READY'],
-        'TEST_COMPLETED': ['TEST_COMPLETED', 'REPORT_READY'],
-    }
+def cancel_booking(booking: Booking, user, reason: str, actor_role=wf.PATIENT):
+    """Patient cancellation — allowed only before the sample is collected."""
+    locked = _lock(booking)
+    previous = locked.booking_status
+    if previous not in wf.CANCELLABLE:
+        if previous in wf.VOID:
+            return None, "This booking is already cancelled."
+        return None, "Your sample has already been collected, so this booking can no longer be cancelled. Please contact support."
 
-    current = booking.booking_status
-    valid_targets = allowed_transitions.get(current, ['SAMPLE_COLLECTED', 'LAB_ANALYSIS', 'REPORT_READY', 'TEST_COMPLETED'])
-    if new_status not in valid_targets:
-        return None, f"Cannot transition status from {current} to {new_status}. Allowed next steps: {', '.join(valid_targets)}."
+    now = timezone.now()
+    seat_claimed = previous != wf.AWAITING_ADVANCE_PAYMENT  # seat is only taken once the advance is paid
+    locked.booking_status = wf.CANCELLED
+    locked.cancelled_by = 'USER' if actor_role == wf.PATIENT else actor_role
+    locked.cancellation_reason = reason
+    locked.cancellation_time = now
+    locked.status_changed_at = now
+    refunded = _refund_advance(locked, reason)
+    locked.save(update_fields=['booking_status', 'cancelled_by', 'cancellation_reason', 'cancellation_time',
+                               'payment_status', 'status_changed_at', 'updated_at'])
+    if seat_claimed:
+        _release_slot(locked)
+    log_status(locked, previous, wf.CANCELLED, actor=user, actor_role=actor_role, notes=reason)
+    _sync(booking, locked)
 
-    booking.booking_status = new_status
-    update_fields = ['booking_status', 'updated_at']
-
-    if new_status == 'TEST_COMPLETED':
-        booking.completed_at = timezone.now()
-        update_fields.append('completed_at')
-
-    # Handle Diagnostic Report Upload
-    if report_file:
-        booking.report_file = report_file
-        booking.report_uploaded_at = timezone.now()
-        booking.report_name = report_name or getattr(report_file, 'name', 'Diagnostic_Report.pdf')
-        update_fields.extend(['report_file', 'report_uploaded_at', 'report_name'])
-
-    if report_notes:
-        booking.report_notes = report_notes
-        update_fields.append('report_notes')
-
-    try:
-        booking.save(update_fields=list(set(update_fields)))
-    except Exception:
-        # Fallback in case newly added report columns have not been migrated yet
-        safe_fields = ['booking_status', 'updated_at']
-        if 'completed_at' in update_fields:
-            safe_fields.append('completed_at')
-        booking.save(update_fields=safe_fields)
-
-    # 1MinDoc Branded Patient Notifications
-    partner_name = booking.partner.centre_name if booking.partner else "Diagnostic Centre"
-
-    if new_status == 'SAMPLE_COLLECTED':
-        send_system_notification(
-            user=booking.user,
-            booking=booking,
-            notification_type='BOOKING_REMINDER',
-            title='Sample Collected - 1MinDoc',
-            message=f"Sample collection for booking {booking.booking_id} has been completed by {partner_name}. Your sample is being transferred to the laboratory for analysis."
-        )
-    elif new_status == 'LAB_ANALYSIS':
-        send_system_notification(
-            user=booking.user,
-            booking=booking,
-            notification_type='LAB_ANALYSIS',
-            title='Lab Analysis in Progress - 1MinDoc',
-            message=f"Your diagnostic samples for booking {booking.booking_id} have reached {partner_name} and laboratory analysis is currently in progress."
-        )
-    elif new_status == 'REPORT_READY':
-        send_system_notification(
-            user=booking.user,
-            booking=booking,
-            notification_type='REPORT_READY',
-            title='Diagnostic Report Ready - 1MinDoc',
-            message=f"Your diagnostic test report for booking {booking.booking_id} from {partner_name} is now ready! You can view and download your verified 1MinDoc medical report."
-        )
-    elif new_status == 'TEST_COMPLETED':
-        send_system_notification(
-            user=booking.user,
-            booking=booking,
-            notification_type='TEST_COMPLETED',
-            title='Test Completed - 1MinDoc',
-            message=(
-                f"All diagnostic procedures for booking {booking.booking_id} have been completed by {partner_name}. "
-                f"Remaining balance due: ₹{booking.balance_amount_due}."
-            )
-        )
-
+    notify(locked.user, 'BOOKING_CANCELLED', 'Booking Cancelled',
+           f"Booking {locked.booking_id} has been cancelled."
+           + (f" A refund of ₹{locked.advance_amount_paid} will be credited within 3-5 working days." if refunded else ""),
+           booking=locked)
+    if previous != wf.AWAITING_ADVANCE_PAYMENT and locked.partner.user_id:
+        notify(locked.partner.user, 'BOOKING_CANCELLED', 'Booking Cancelled by Patient',
+               f"Booking {locked.booking_id} ({locked.patient_name}) was cancelled. Reason: {reason}", booking=locked)
     return booking, None
 
 
@@ -657,21 +886,28 @@ def generate_1mindoc_pdf_report(booking: Booking) -> bytes:
     return buffer.getvalue()
 
 
+
 @transaction.atomic
 def process_balance_payment(booking: Booking, payment_mode='ONLINE', gateway_transaction_id=None, offline_reference=None, recorded_by_partner=False):
     """
-    Collects 70% balance payment either via online payment gateway or approved partner offline collection.
+    70% balance — online by the patient or recorded offline by the partner.
+    Payable from sample collection onwards; never on a cancelled booking.
     """
-    if booking.payment_status == 'FULLY_PAID':
+    locked = _lock(booking)
+    if locked.booking_status in wf.VOID:
+        return None, "This booking is cancelled; no balance is due."
+    if locked.booking_status not in wf.BALANCE_PAYABLE:
+        return None, "The balance can be paid once your sample has been collected."
+    if locked.payment_status == 'FULLY_PAID':
         return None, "Balance has already been fully paid for this booking."
 
-    balance_due = booking.balance_amount_due - booking.balance_amount_paid
+    balance_due = locked.balance_amount_due - locked.balance_amount_paid
     if balance_due <= Decimal('0.00'):
         return None, "No outstanding balance for this booking."
 
     payment = Payment.objects.create(
-        payment_id=f"PAY-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
-        booking=booking,
+        payment_id=_ref('PAY'),
+        booking=locked,
         payment_type='BALANCE_70',
         amount=balance_due,
         payment_mode=payment_mode,
@@ -681,17 +917,12 @@ def process_balance_payment(booking: Booking, payment_mode='ONLINE', gateway_tra
         recorded_by_partner=recorded_by_partner,
     )
 
-    booking.balance_amount_paid += balance_due
-    booking.payment_status = 'FULLY_PAID'
-    booking.save(update_fields=['balance_amount_paid', 'payment_status', 'updated_at'])
+    locked.balance_amount_paid += balance_due
+    locked.payment_status = 'FULLY_PAID'
+    locked.save(update_fields=['balance_amount_paid', 'payment_status', 'updated_at'])
+    _sync(booking, locked)
 
-    send_system_notification(
-        user=booking.user,
-        booking=booking,
-        notification_type='PAYMENT_RESULT',
-        title='Balance Payment (70%) Received - Booking Fully Paid',
-        message=f"Final 70% payment of ₹{balance_due} received. Booking {booking.booking_id} is now fully settled."
-    )
-
+    notify(locked.user, 'PAYMENT_RESULT', 'Balance Payment (70%) Received - Booking Fully Paid',
+           f"Final 70% payment of ₹{balance_due} received. Booking {locked.booking_id} is now fully settled.",
+           booking=locked)
     return payment, None
-

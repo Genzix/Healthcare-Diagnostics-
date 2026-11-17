@@ -1,5 +1,28 @@
 from rest_framework import serializers
-from .models import Booking, BookingItem, Payment, Notification
+
+from . import workflow as wf
+from .models import Booking, BookingItem, BookingStatusLog, Payment, Notification
+
+
+def _audience(serializer):
+    """PATIENT (default, least privilege) | PARTNER | ADMIN — set by the view via context."""
+    return (serializer.context or {}).get('audience', wf.PATIENT)
+
+
+class BookingStatusLogSerializer(serializers.ModelSerializer):
+    from_label = serializers.SerializerMethodField()
+    to_label = serializers.SerializerMethodField()
+    status = serializers.CharField(source='to_status', read_only=True)
+
+    class Meta:
+        model = BookingStatusLog
+        fields = ['id', 'status', 'from_status', 'to_status', 'from_label', 'to_label', 'actor_role', 'notes', 'created_at']
+
+    def get_from_label(self, obj):
+        return wf.LABELS.get(obj.from_status, obj.from_status)
+
+    def get_to_label(self, obj):
+        return wf.LABELS.get(obj.to_status, obj.to_status)
 
 
 class BookingItemSerializer(serializers.ModelSerializer):
@@ -32,70 +55,88 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     partner_name = serializers.CharField(source='partner.centre_name', read_only=True)
     partner_address = serializers.CharField(source='partner.address_line', read_only=True)
     partner_phone = serializers.CharField(source='partner.contact_phone', read_only=True)
+    status_label = serializers.SerializerMethodField()
+    lab_progress = serializers.SerializerMethodField()
+    status_history = serializers.SerializerMethodField()
+    next_actions = serializers.SerializerMethodField()
+    can_cancel = serializers.SerializerMethodField()
     report_download_url = serializers.SerializerMethodField()
     has_report = serializers.SerializerMethodField()
+    report_notes = serializers.SerializerMethodField()
+    report_verified_by_name = serializers.SerializerMethodField()
+
+    # Never expose the raw /media/ path: reports are fetched through the
+    # authenticated download endpoint, which enforces who may see them.
+    REPORT_PRIVATE_FIELDS = ('report_file_size', 'report_file_sha256', 'report_verified_by_registration', 'report_uploaded_at', 'report_name')
 
     class Meta:
         model = Booking
         fields = [
-            'id',
-            'booking_id',
-            'user',
-            'partner',
-            'partner_name',
-            'partner_address',
-            'partner_phone',
-            'patient_type',
-            'family_member',
-            'patient_name',
-            'patient_age',
-            'patient_gender',
-            'patient_phone',
-            'service_mode',
-            'collection_address',
-            'collection_city',
-            'collection_pincode',
-            'collection_landmark',
-            'centre_name_snapshot',
-            'centre_address_snapshot',
-            'booking_date',
-            'slot_start_time',
-            'slot_end_time',
-            'subtotal_amount',
-            'home_collection_fee',
-            'discount_amount',
-            'total_amount',
-            'advance_amount_due',
-            'advance_amount_paid',
-            'balance_amount_due',
-            'balance_amount_paid',
-            'booking_status',
-            'payment_status',
-            'partner_rejection_reason',
-            'cancelled_by',
-            'cancellation_reason',
-            'cancellation_time',
-            'report_file',
-            'report_uploaded_at',
-            'report_notes',
-            'report_name',
-            'report_download_url',
-            'has_report',
-            'items',
-            'payments',
-            'created_at',
-            'updated_at',
-            'confirmed_at',
-            'completed_at',
+            'id', 'booking_id', 'user', 'partner', 'partner_name', 'partner_address', 'partner_phone',
+            'patient_type', 'family_member', 'patient_name', 'patient_age', 'patient_gender', 'patient_phone',
+            'service_mode', 'collection_address', 'collection_city', 'collection_pincode', 'collection_landmark',
+            'centre_name_snapshot', 'centre_address_snapshot',
+            'booking_date', 'slot_start_time', 'slot_end_time',
+            'subtotal_amount', 'home_collection_fee', 'discount_amount', 'total_amount',
+            'advance_amount_due', 'advance_amount_paid', 'balance_amount_due', 'balance_amount_paid',
+            'booking_status', 'status_label', 'payment_status', 'lab_progress', 'next_actions', 'can_cancel',
+            'partner_rejection_reason', 'cancelled_by', 'cancellation_reason', 'cancellation_time',
+            'has_report', 'report_download_url', 'report_name', 'report_notes', 'report_uploaded_at',
+            'report_file_size', 'report_file_sha256',
+            'report_verified_by_name', 'report_verified_by_registration', 'report_verified_at',
+            'report_released_at', 'patient_notified_at',
+            'report_first_downloaded_at', 'report_last_downloaded_at', 'report_download_count',
+            'status_history', 'items', 'payments',
+            'created_at', 'updated_at', 'confirmed_at', 'sample_collected_at', 'sample_received_at',
+            'completed_at', 'status_changed_at',
         ]
 
+    def to_representation(self, obj):
+        data = super().to_representation(obj)
+        if _audience(self) == wf.PATIENT and not obj.is_report_released:
+            for f in self.REPORT_PRIVATE_FIELDS:
+                data[f] = None
+        return data
+
+    def _visible_to_patient(self, obj):
+        return _audience(self) != wf.PATIENT or obj.is_report_released
+
+    def get_status_label(self, obj):
+        return wf.LABELS.get(obj.booking_status, obj.booking_status)
+
+    def get_lab_progress(self, obj):
+        return wf.progress(obj.booking_status)
+
+    def get_status_history(self, obj):
+        logs = obj.status_logs.all()
+        if _audience(self) == wf.PATIENT:
+            # Internal QA notes (e.g. a verifier's send-back reason) stay inside the lab.
+            return [
+                {**row, 'notes': '' if row['to_status'] in (wf.REPORT_GENERATED, wf.REPORT_UPLOADED, wf.REPORT_VERIFIED) else row['notes']}
+                for row in BookingStatusLogSerializer(logs, many=True).data
+            ]
+        return BookingStatusLogSerializer(logs, many=True).data
+
+    def get_next_actions(self, obj):
+        aud = _audience(self)
+        return wf.next_steps(obj.booking_status, wf.PARTNER) if aud in (wf.PARTNER, wf.ADMIN) else []
+
+    def get_can_cancel(self, obj):
+        return obj.booking_status in wf.CANCELLABLE
+
+    def get_has_report(self, obj):
+        return bool(obj.report_file) and self._visible_to_patient(obj)
+
     def get_report_download_url(self, obj):
-        if obj.booking_status in ['REPORT_READY', 'TEST_COMPLETED'] or getattr(obj, 'report_file', None):
+        if self.get_has_report(obj):
             return f"/api/bookings/{obj.booking_id}/download-report/"
         return None
 
-    def get_has_report(self, obj):
-        return bool(getattr(obj, 'report_file', None) or obj.booking_status in ['REPORT_READY', 'TEST_COMPLETED'])
+    def get_report_notes(self, obj):
+        return obj.report_notes if self._visible_to_patient(obj) else ''
+
+    def get_report_verified_by_name(self, obj):
+        return obj.report_verified_by_name if self._visible_to_patient(obj) else ''
 
 
 class BookingListSerializer(serializers.ModelSerializer):
@@ -117,10 +158,27 @@ class BookingListSerializer(serializers.ModelSerializer):
             'advance_amount_paid',
             'balance_amount_due',
             'booking_status',
+            'status_label',
             'payment_status',
+            'lab_progress',
+            'has_report',
             'items_count',
             'created_at',
+            'updated_at',
         ]
+
+    status_label = serializers.SerializerMethodField()
+    lab_progress = serializers.SerializerMethodField()
+    has_report = serializers.SerializerMethodField()
+
+    def get_status_label(self, obj):
+        return wf.LABELS.get(obj.booking_status, obj.booking_status)
+
+    def get_lab_progress(self, obj):
+        return wf.progress(obj.booking_status)
+
+    def get_has_report(self, obj):
+        return bool(obj.report_file) and obj.is_report_released
 
 
 class PriceEstimateRequestSerializer(serializers.Serializer):
@@ -198,61 +256,40 @@ class PartnerRejectBookingSerializer(serializers.Serializer):
 
 
 class PartnerStatusUpdateSerializer(serializers.Serializer):
+    """
+    POST /api/partner/bookings/<id>/update-status/
+      new_status | status          target stage (aliases accepted, e.g. "received at lab")
+      notes                        shown in the timeline (required when sending a report back)
+      expected_status              optional optimistic-concurrency guard → 409 if stale
+      report_file (multipart)      required for REPORT_UPLOADED
+      report_notes, report_name    optional, with the upload
+      verified_by_name             required for REPORT_VERIFIED
+      verified_by_registration     optional registration number of the verifier
+    """
     new_status = serializers.CharField(required=False)
     status = serializers.CharField(required=False)
+    notes = serializers.CharField(required=False, allow_blank=True, max_length=1000)
+    expected_status = serializers.CharField(required=False, allow_blank=True)
     report_file = serializers.FileField(required=False, allow_null=True)
-    report_notes = serializers.CharField(required=False, allow_blank=True)
-    notes = serializers.CharField(required=False, allow_blank=True)
-    report_name = serializers.CharField(required=False, allow_blank=True)
-
-    def to_internal_value(self, data):
-        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
-        if not data_copy.get('new_status') and data_copy.get('status'):
-            data_copy['new_status'] = data_copy.get('status')
-        if not data_copy.get('report_notes') and data_copy.get('notes'):
-            data_copy['report_notes'] = data_copy.get('notes')
-        return super().to_internal_value(data_copy)
+    report_notes = serializers.CharField(required=False, allow_blank=True, max_length=4000)
+    report_name = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    verified_by_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    verified_by_registration = serializers.CharField(required=False, allow_blank=True, max_length=60)
 
     def validate(self, attrs):
-        if not attrs.get('new_status'):
-            raise serializers.ValidationError({"new_status": "Service status is required (e.g. 'new_status' or 'status')."})
+        raw = attrs.get('new_status') or attrs.get('status')
+        if not raw:
+            raise serializers.ValidationError({"new_status": "Target status is required (e.g. 'SAMPLE_RECEIVED')."})
+        target = wf.normalize(raw)
+        known = {wf.TEST_COMPLETED, *wf.STEPS.keys()}
+        if target not in known:
+            raise serializers.ValidationError({
+                "new_status": f"'{raw}' is not a lab workflow status. Choose from: {', '.join(wf.PIPELINE[1:-1])}."
+            })
+        attrs['new_status'] = target
+        if attrs.get('expected_status'):
+            attrs['expected_status'] = wf.normalize(attrs['expected_status'])
         return attrs
-
-    def validate_new_status(self, value):
-        if not value:
-            raise serializers.ValidationError("Status is required.")
-        status_str = str(value).strip().upper().replace(' ', '_').replace('-', '_')
-        status_mapping = {
-            'SAMPLE_COLLECTED': 'SAMPLE_COLLECTED',
-            'SAMPLE_COLLECTION': 'SAMPLE_COLLECTED',
-            'SAMPLE_DONE': 'SAMPLE_COLLECTED',
-            'VISIT_DONE': 'SAMPLE_COLLECTED',
-
-            'LAB_ANALYSIS': 'LAB_ANALYSIS',
-            'IN_ANALYSIS': 'LAB_ANALYSIS',
-            'ANALYSIS': 'LAB_ANALYSIS',
-            'PROCESSING': 'LAB_ANALYSIS',
-            'LAB_PROCESSING': 'LAB_ANALYSIS',
-            'UNDER_TESTING': 'LAB_ANALYSIS',
-            'UNDER_ANALYSIS': 'LAB_ANALYSIS',
-            'SAMPLE_RECEIVED_AT_LAB': 'LAB_ANALYSIS',
-
-            'REPORT_READY': 'REPORT_READY',
-            'REPORT_GENERATED': 'REPORT_READY',
-            'REPORT_UPLOADED': 'REPORT_READY',
-            'READY': 'REPORT_READY',
-
-            'TEST_COMPLETED': 'TEST_COMPLETED',
-            'COMPLETED': 'TEST_COMPLETED',
-            'DONE': 'TEST_COMPLETED',
-        }
-        normalized = status_mapping.get(status_str, status_str)
-        valid_statuses = ['SAMPLE_COLLECTED', 'LAB_ANALYSIS', 'REPORT_READY', 'TEST_COMPLETED']
-        if normalized not in valid_statuses:
-            raise serializers.ValidationError(
-                f"'{value}' is not a valid service status. Choose from: {', '.join(valid_statuses)}"
-            )
-        return normalized
 
 
 class PartnerReportUploadSerializer(serializers.Serializer):
@@ -294,7 +331,11 @@ class NotificationSerializer(serializers.ModelSerializer):
             'title',
             'message',
             'booking',
+            'booking_ref',
             'is_read',
+            'push_status',
             'created_at',
         ]
+
+    booking_ref = serializers.CharField(source='booking.booking_id', read_only=True, default=None)
 

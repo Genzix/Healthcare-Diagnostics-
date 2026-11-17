@@ -4,6 +4,8 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 
+from . import workflow
+
 
 def generate_booking_id():
     return f"BK-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
@@ -11,6 +13,11 @@ def generate_booking_id():
 
 def generate_receipt_number():
     return f"RCP-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+
+def report_upload_path(instance, filename):
+    """Unguessable storage name — never reuse the uploader's filename (it often contains the patient's name)."""
+    return f"booking_reports/{timezone.now():%Y/%m}/{uuid.uuid4().hex}.pdf"
 
 
 class Booking(models.Model):
@@ -24,17 +31,7 @@ class Booking(models.Model):
         ('CENTRE_VISIT', 'Diagnostic Centre Visit'),
     )
 
-    BOOKING_STATUS_CHOICES = (
-        ('AWAITING_ADVANCE_PAYMENT', 'Awaiting Advance Payment'),
-        ('AWAITING_PARTNER_CONFIRMATION', 'Awaiting Partner Confirmation'),
-        ('CONFIRMED', 'Confirmed'),
-        ('SAMPLE_COLLECTED', 'Sample Collected / Visit Done'),
-        ('LAB_ANALYSIS', 'Lab Analysis in Progress'),
-        ('REPORT_READY', 'Report Ready / Generated'),
-        ('TEST_COMPLETED', 'Test Completed'),
-        ('CANCELLED', 'Cancelled'),
-        ('REJECTED_BY_PARTNER', 'Rejected by Partner'),
-    )
+    BOOKING_STATUS_CHOICES = workflow.STATUS_CHOICES
 
     PAYMENT_STATUS_CHOICES = (
         ('PENDING', 'Payment Pending'),
@@ -149,7 +146,7 @@ class Booking(models.Model):
 
     # Diagnostic Report (1MinDoc Branding)
     report_file = models.FileField(
-        upload_to='booking_reports/%Y/%m/',
+        upload_to=report_upload_path,
         null=True,
         blank=True,
         help_text="Uploaded diagnostic lab test report"
@@ -157,20 +154,62 @@ class Booking(models.Model):
     report_uploaded_at = models.DateTimeField(null=True, blank=True)
     report_notes = models.TextField(blank=True, help_text="Clinical summary or lab technician notes")
     report_name = models.CharField(max_length=255, blank=True)
+    report_file_size = models.PositiveIntegerField(null=True, blank=True)
+    report_file_sha256 = models.CharField(max_length=64, blank=True)
+
+    # Report verification (authorised laboratory personnel)
+    report_verified_by_name = models.CharField(max_length=150, blank=True)
+    report_verified_by_registration = models.CharField(max_length=60, blank=True, help_text="Pathologist / technologist registration no.")
+    report_verified_at = models.DateTimeField(null=True, blank=True)
+
+    # Release & patient access
+    report_released_at = models.DateTimeField(null=True, blank=True)
+    patient_notified_at = models.DateTimeField(null=True, blank=True)
+    report_first_downloaded_at = models.DateTimeField(null=True, blank=True)
+    report_last_downloaded_at = models.DateTimeField(null=True, blank=True)
+    report_download_count = models.PositiveIntegerField(default=0)
 
     # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     confirmed_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    sample_collected_at = models.DateTimeField(null=True, blank=True)
+    sample_received_at = models.DateTimeField(null=True, blank=True)
+    status_changed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         verbose_name = 'Booking'
         verbose_name_plural = 'Bookings'
         ordering = ['-created_at']
+        indexes = [models.Index(fields=['partner', 'booking_status'], name='booking_partner_status_idx')]
+
+    @property
+    def is_report_released(self):
+        return self.booking_status in workflow.REPORT_RELEASED
 
     def __str__(self):
         return f"{self.booking_id} | {self.patient_name} | {self.partner.centre_name} - {self.booking_status}"
+
+
+class BookingStatusLog(models.Model):
+    """Append-only audit trail: one row per status change (who, when, from → to, why)."""
+    booking = models.ForeignKey(Booking, on_delete=models.CASCADE, related_name='status_logs')
+    from_status = models.CharField(max_length=40, blank=True)
+    to_status = models.CharField(max_length=40, choices=workflow.STATUS_CHOICES)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    actor_role = models.CharField(max_length=20, blank=True)  # PARTNER / PATIENT / ADMIN / SYSTEM
+    notes = models.TextField(blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Booking Status Log'
+        verbose_name_plural = 'Booking Status Logs'
+        ordering = ['created_at', 'id']
+
+    def __str__(self):
+        return f"{self.booking_id}: {self.from_status or '∅'} → {self.to_status}"
 
 
 class BookingItem(models.Model):
@@ -273,6 +312,18 @@ class Notification(models.Model):
         ('REPORT_READY', 'Report Ready / Generated'),
         ('TEST_COMPLETED', 'Test Completed'),
         ('BALANCE_PAYMENT_REMINDER', 'Balance Payment Reminder'),
+        ('SAMPLE_COLLECTED', 'Sample Collected'),
+        ('SAMPLE_RECEIVED', 'Sample Received at Lab'),
+        ('REPORT_DOWNLOADED', 'Report Downloaded'),
+        ('BOOKING_CANCELLED', 'Booking Cancelled'),
+    )
+
+    PUSH_STATUS_CHOICES = (
+        ('NOT_REQUESTED', 'In-app only'),
+        ('PENDING', 'Push pending'),
+        ('SENT', 'Push sent'),
+        ('SKIPPED', 'Push skipped (no device / backend)'),
+        ('FAILED', 'Push failed'),
     )
 
     user = models.ForeignKey(
@@ -291,6 +342,8 @@ class Notification(models.Model):
     title = models.CharField(max_length=200)
     message = models.TextField()
     is_read = models.BooleanField(default=False)
+    push_status = models.CharField(max_length=20, choices=PUSH_STATUS_CHOICES, default='NOT_REQUESTED')
+    push_error = models.CharField(max_length=255, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
