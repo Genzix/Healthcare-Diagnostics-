@@ -8,6 +8,7 @@ from .views import (
     PartnerServiceAreaListCreateView,
     PartnerServiceAreaDeleteView,
     PartnerSlotListCreateView,
+    PartnerSlotDetailView,
     PartnerTestPricingManageView,
     PartnerPackagePricingManageView,
     PartnerDashboardSummaryView,
@@ -40,6 +41,7 @@ urlpatterns = [
     path('api/partner/service-areas/', PartnerServiceAreaListCreateView.as_view(), name='api_partner_service_areas'),
     path('api/partner/service-areas/<int:pk>/', PartnerServiceAreaDeleteView.as_view(), name='api_partner_service_area_delete'),
     path('api/partner/slots/', PartnerSlotListCreateView.as_view(), name='api_partner_slots_manage'),
+    path('api/partner/slots/<int:pk>/', PartnerSlotDetailView.as_view(), name='api_partner_slot_detail'),
     path('api/partner/tests/', PartnerTestPricingManageView.as_view(), name='api_partner_tests_manage'),
     path('api/partner/packages/', PartnerPackagePricingManageView.as_view(), name='api_partner_packages_manage'),
 ]

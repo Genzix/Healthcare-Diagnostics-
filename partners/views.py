@@ -600,30 +600,205 @@ class PartnerServiceAreaDeleteView(APIView):
             return Response({"success": False, "message": "Service area not found."}, status=status.HTTP_404_NOT_FOUND)
 
 
+def _parse_iso_date(value):
+    from datetime import date as _date
+    try:
+        return _date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_error(errors):
+    """Flatten a DRF error dict/list into one human readable message."""
+    if isinstance(errors, dict):
+        for key, val in errors.items():
+            msg = _first_error(val)
+            if msg:
+                return msg if key in ('non_field_errors', 'detail') else f"{key}: {msg}"
+    elif isinstance(errors, (list, tuple)):
+        for val in errors:
+            msg = _first_error(val)
+            if msg:
+                return msg
+    elif errors:
+        return str(errors)
+    return ''
+
+
 class PartnerSlotListCreateView(APIView):
     """
-    Partner Dashboard: Configure available dates and time slots.
+    Partner Dashboard: configure available dates and time slots.
+
+    GET  /api/partner/slots/
+         ?date=YYYY-MM-DD                         single day (default: today)
+         ?start_date=YYYY-MM-DD&end_date=...      inclusive range (max 92 days)
+         &service_mode=HOME_COLLECTION|CENTRE_VISIT|ALL
+         &include_inactive=false                  hide deactivated slots
+    POST /api/partner/slots/
+         single:  {date, start_time, end_time, service_mode, max_capacity}
+         bulk:    {"slots": [ {...}, ... ], "on_conflict": "skip" | "fail"}
+                  skip (default) -> creates every valid slot, reports the rest
+                  fail           -> all-or-nothing, rolls back on the first error
     """
     permission_classes = [IsAuthenticated]
+    MAX_RANGE_DAYS = 92
+    MAX_BULK = 500
 
     def get(self, request, *args, **kwargs):
+        from datetime import timedelta
+        from django.db.models import Sum, Count
+
         partner = get_partner_for_user(request.user)
         if not partner:
             return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
-        date = request.query_params.get('date', timezone.now().date())
-        slots = partner.slots.filter(date=date).order_by('start_time')
-        serializer = PartnerSlotSerializer(slots, many=True)
-        return Response({"success": True, "slots": serializer.data}, status=status.HTTP_200_OK)
+
+        params = request.query_params
+        if params.get('start_date') or params.get('end_date'):
+            start = _parse_iso_date(params.get('start_date')) or timezone.localdate()
+            end = _parse_iso_date(params.get('end_date')) or start
+            if end < start:
+                return Response({"success": False, "message": "end_date must be on or after start_date."}, status=status.HTTP_400_BAD_REQUEST)
+            if (end - start).days > self.MAX_RANGE_DAYS:
+                end = start + timedelta(days=self.MAX_RANGE_DAYS)
+        else:
+            start = _parse_iso_date(params.get('date')) or timezone.localdate()
+            end = start
+
+        slots = partner.slots.filter(date__range=(start, end))
+        mode = (params.get('service_mode') or '').upper()
+        if mode in ('HOME_COLLECTION', 'CENTRE_VISIT'):
+            slots = slots.filter(service_mode__in=[mode, 'ALL'])
+        elif mode == 'ALL':
+            slots = slots.filter(service_mode='ALL')
+        if str(params.get('include_inactive', 'true')).lower() in ('0', 'false', 'no'):
+            slots = slots.filter(is_active=True)
+        slots = slots.order_by('date', 'start_time')
+
+        totals = slots.filter(is_active=True).aggregate(
+            capacity=Sum('max_capacity'), booked=Sum('booked_count'), count=Count('id')
+        )
+        return Response({
+            "success": True,
+            "range": {"start_date": start.isoformat(), "end_date": end.isoformat()},
+            "summary": {
+                "total_slots": slots.count(),
+                "active_slots": totals['count'] or 0,
+                "total_capacity": totals['capacity'] or 0,
+                "booked": totals['booked'] or 0,
+            },
+            "slots": PartnerSlotSerializer(slots, many=True).data,
+        }, status=status.HTTP_200_OK)
 
     def post(self, request, *args, **kwargs):
         partner = get_partner_for_user(request.user)
         if not partner:
             return Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
-        serializer = PartnerSlotSerializer(data=request.data)
+
+        data = request.data
+        if isinstance(data, list) or (hasattr(data, 'get') and isinstance(data.get('slots'), list)):
+            items = data if isinstance(data, list) else data.get('slots')
+            on_conflict = 'skip' if isinstance(data, list) else str(data.get('on_conflict', 'skip')).lower()
+            return self._bulk_create(partner, items, on_conflict)
+
+        serializer = PartnerSlotSerializer(data=data, context={'partner': partner, 'request': request})
         if not serializer.is_valid():
-            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"success": False, "message": _first_error(serializer.errors), "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
         slot = serializer.save(partner=partner)
         return Response({"success": True, "message": "Slot created successfully.", "slot": PartnerSlotSerializer(slot).data}, status=status.HTTP_201_CREATED)
+
+    def _bulk_create(self, partner, items, on_conflict):
+        from django.db import transaction
+
+        if not items:
+            return Response({"success": False, "message": "No slots supplied."}, status=status.HTTP_400_BAD_REQUEST)
+        if len(items) > self.MAX_BULK:
+            return Response({"success": False, "message": f"At most {self.MAX_BULK} slots can be created at once."}, status=status.HTTP_400_BAD_REQUEST)
+
+        created, skipped = [], []
+        with transaction.atomic():
+            # Serialize concurrent bulk runs for the same partner so overlap checks stay sound.
+            DiagnosticPartner.objects.select_for_update().filter(pk=partner.pk).first()
+            for index, item in enumerate(items):
+                # Each item is validated against the DB *after* the previous ones were saved,
+                # so overlaps inside the same batch are caught too.
+                serializer = PartnerSlotSerializer(data=item, context={'partner': partner})
+                if serializer.is_valid():
+                    created.append(serializer.save(partner=partner))
+                    continue
+                reason = _first_error(serializer.errors)
+                if on_conflict == 'fail':
+                    transaction.set_rollback(True)
+                    return Response({
+                        "success": False,
+                        "message": f"Slot #{index + 1} ({item.get('date')} {item.get('start_time')}): {reason}",
+                        "errors": {"index": index, "detail": serializer.errors},
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                skipped.append({
+                    "index": index,
+                    "date": item.get('date'),
+                    "start_time": item.get('start_time'),
+                    "end_time": item.get('end_time'),
+                    "reason": reason,
+                })
+
+        return Response({
+            "success": True,
+            "message": f"Created {len(created)} slot(s)" + (f", skipped {len(skipped)}." if skipped else "."),
+            "created_count": len(created),
+            "skipped_count": len(skipped),
+            "slots": PartnerSlotSerializer(created, many=True).data,
+            "skipped": skipped,
+        }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+
+class PartnerSlotDetailView(APIView):
+    """
+    GET    /api/partner/slots/<pk>/
+    PATCH  /api/partner/slots/<pk>/   {max_capacity?, is_active?, start_time?, end_time?, date?, service_mode?}
+    DELETE /api/partner/slots/<pk>/   only when nothing is booked; otherwise deactivate it
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get(self, request, pk):
+        partner = get_partner_for_user(request.user)
+        if not partner:
+            return None, Response({"success": False, "message": "Partner profile required."}, status=status.HTTP_403_FORBIDDEN)
+        slot = partner.slots.filter(pk=pk).first()
+        if not slot:
+            return None, Response({"success": False, "message": "Slot not found."}, status=status.HTTP_404_NOT_FOUND)
+        return slot, None
+
+    def get(self, request, pk, *args, **kwargs):
+        slot, err = self._get(request, pk)
+        if err:
+            return err
+        return Response({"success": True, "slot": PartnerSlotSerializer(slot).data})
+
+    def patch(self, request, pk, *args, **kwargs):
+        from django.db import transaction
+
+        with transaction.atomic():
+            slot, err = self._get(request, pk)
+            if err:
+                return err
+            slot = PartnerSlot.objects.select_for_update().get(pk=slot.pk)
+            serializer = PartnerSlotSerializer(slot, data=request.data, partial=True, context={'partner': slot.partner})
+            if not serializer.is_valid():
+                return Response({"success": False, "message": _first_error(serializer.errors), "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+            slot = serializer.save()
+        return Response({"success": True, "message": "Slot updated.", "slot": PartnerSlotSerializer(slot).data})
+
+    def delete(self, request, pk, *args, **kwargs):
+        slot, err = self._get(request, pk)
+        if err:
+            return err
+        if slot.booked_count > 0:
+            return Response({
+                "success": False,
+                "message": f"This slot has {slot.booked_count} booking(s). Deactivate it instead of deleting.",
+            }, status=status.HTTP_409_CONFLICT)
+        slot.delete()
+        return Response({"success": True, "message": "Slot deleted."}, status=status.HTTP_200_OK)
 
 
 class PartnerTestPricingManageView(APIView):

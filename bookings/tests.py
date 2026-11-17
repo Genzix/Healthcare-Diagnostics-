@@ -725,3 +725,117 @@ class LabReportPipelineTests(TestCase):
         res = self.client.get('/api/bookings/workflow/')
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data['pipeline'][-1]['status'], 'REPORT_DOWNLOADED')
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA)
+class PayAtCollectionTests(TestCase):
+    """Book now, pay cash / UPI to the collector or at the centre — or online later."""
+
+    setUp = FullApplicationFlowTests.setUp
+    pdf = staticmethod(FullApplicationFlowTests.pdf)
+    run_lab_pipeline = FullApplicationFlowTests.run_lab_pipeline
+
+    def create_via_api(self, **extra):
+        # Exactly what the web app sends (extra keys must be ignored, not 500).
+        body = {
+            'patient_type': 'SELF', 'partner_id': self.partner.id, 'service_mode': 'HOME_COLLECTION',
+            'booking_mode': 'HOME_COLLECTION', 'appointment_date': str(self.tomorrow), 'slot_id': self.slot.id,
+            'appointment_time': '09:00:00', 'collection_address': '16-32, mvpeta', 'collection_city': 'Hyderabad',
+            'collection_pincode': '500081', 'contact_phone': '+919876543210', 'test_ids': [self.test1.id],
+            'package_ids': [], 'notes': '', **extra,
+        }
+        res = self.client.post('/api/bookings/', body, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        return res.data['booking']
+
+    def test_frontend_create_payload_offers_pay_at_collection(self):
+        b = self.create_via_api()
+        self.assertEqual(b['booking_status'], 'AWAITING_ADVANCE_PAYMENT')
+        self.assertTrue(b['payment_options']['can_pay_advance'])
+        self.assertTrue(b['payment_options']['pay_at_collection']['available'])
+
+    def test_price_estimate_reports_eligibility(self):
+        res = self.client.post('/api/bookings/price-estimate/', {
+            'partner_id': self.partner.id, 'service_mode': 'CENTRE_VISIT', 'test_ids': [self.test1.id],
+        }, format='json')
+        self.assertTrue(res.data['estimate']['pay_at_collection']['available'])
+
+    def test_full_cash_flow_partner_collects_whole_amount(self):
+        b = self.create_via_api()
+        res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+        self.assertEqual(res.status_code, 200, res.data)
+        data = res.data['booking']
+        self.assertEqual(data['booking_status'], 'AWAITING_PARTNER_CONFIRMATION')
+        self.assertEqual(data['payment_plan'], 'PAY_AT_COLLECTION')
+        self.assertEqual(data['payment_status'], 'PENDING')
+        self.assertEqual(Decimal(data['amount_outstanding']), Decimal('650.00'))  # 500 + 150 home fee
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 1)
+
+        booking = Booking.objects.get(booking_id=b['booking_id'])
+        partner_accept_booking(booking, self.partner_user)
+        booking = self.run_lab_pipeline(booking, until='SAMPLE_COLLECTED')
+
+        self.client.force_authenticate(self.partner_user)
+        res = self.client.post(f"/api/partner/bookings/{booking.booking_id}/record-balance/",
+                               {'payment_mode': 'CASH', 'offline_reference': 'CASH-001'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['payment']['payment_type'], 'FULL')
+        self.assertEqual(Decimal(res.data['payment']['amount']), Decimal('650.00'))
+        self.assertEqual(res.data['booking']['payment_status'], 'FULLY_PAID')
+        self.assertEqual(Decimal(res.data['booking']['amount_outstanding']), Decimal('0.00'))
+
+    def test_patient_can_switch_to_online_after_confirmation_only(self):
+        b = self.create_via_api(service_mode='CENTRE_VISIT', booking_mode='CENTRE_VISIT', collection_address='', collection_pincode='')
+        self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+        res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-balance/", {'payment_mode': 'UPI'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('once the lab confirms', res.data['message'])
+
+        partner_accept_booking(Booking.objects.get(booking_id=b['booking_id']), self.partner_user)
+        res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-balance/", {'payment_mode': 'UPI'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['booking']['payment_status'], 'FULLY_PAID')
+        self.assertEqual(Decimal(res.data['payment']['amount']), Decimal('500.00'))
+
+    def test_cancel_pay_later_booking_frees_seat_without_refund(self):
+        b = self.create_via_api()
+        self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+        res = self.client.post(f"/api/bookings/{b['booking_id']}/cancel/", {'reason': 'Schedule conflict'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['booking']['payment_status'], 'PENDING')
+        self.assertFalse(Payment.objects.filter(booking__booking_id=b['booking_id'], payment_type='REFUND').exists())
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 0)
+
+    def test_refund_covers_everything_paid(self):
+        b = self.create_via_api(service_mode='CENTRE_VISIT', booking_mode='CENTRE_VISIT', collection_address='', collection_pincode='')
+        self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+        partner_accept_booking(Booking.objects.get(booking_id=b['booking_id']), self.partner_user)
+        self.client.post(f"/api/bookings/{b['booking_id']}/pay-balance/", {'payment_mode': 'UPI'}, format='json')
+        self.client.post(f"/api/bookings/{b['booking_id']}/cancel/", {'reason': 'Travelling'}, format='json')
+        refund = Payment.objects.get(booking__booking_id=b['booking_id'], payment_type='REFUND')
+        self.assertEqual(refund.amount, Decimal('500.00'))
+
+    def test_guard_rails(self):
+        self.partner.accepts_pay_at_collection = False
+        self.partner.save()
+        b = self.create_via_api()
+        res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('online advance payment only', res.data['message'])
+
+        self.partner.accepts_pay_at_collection = True
+        self.partner.save()
+        with self.settings(PAY_AT_COLLECTION_MAX_AMOUNT=100):
+            res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+            self.assertIn('up to ₹100', res.data['message'])
+        with self.settings(PAY_AT_COLLECTION_MAX_OPEN=0):
+            res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+            self.assertIn('unpaid pay-at-collection', res.data['message'])
+
+    def test_cannot_choose_after_advance_paid(self):
+        b = self.create_via_api()
+        self.client.post(f"/api/bookings/{b['booking_id']}/pay-advance/", {'payment_mode': 'UPI'}, format='json')
+        res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
+        self.assertEqual(res.status_code, 400)

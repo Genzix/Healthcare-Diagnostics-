@@ -19,6 +19,7 @@ from .views import (
     AdminAllBookingsListView,
     AdminPartnerApprovalView,
     BookingWorkflowView,
+    PayAtCollectionView,
     PartnerBookingDetailView,
 )
 
@@ -33,6 +34,8 @@ urlpatterns = [
     path('api/bookings/<str:pk>/', BookingDetailView.as_view(), name='api_booking_detail_str'),
     path('api/bookings/<int:pk>/pay-advance/', PayAdvanceView.as_view(), name='api_booking_pay_advance_int'),
     path('api/bookings/<str:pk>/pay-advance/', PayAdvanceView.as_view(), name='api_booking_pay_advance_str'),
+    path('api/bookings/<int:pk>/pay-at-collection/', PayAtCollectionView.as_view(), name='api_booking_pay_at_collection_int'),
+    path('api/bookings/<str:pk>/pay-at-collection/', PayAtCollectionView.as_view(), name='api_booking_pay_at_collection_str'),
     path('api/bookings/<int:pk>/pay-balance/', PayBalanceView.as_view(), name='api_booking_pay_balance_int'),
     path('api/bookings/<str:pk>/pay-balance/', PayBalanceView.as_view(), name='api_booking_pay_balance_str'),
     path('api/bookings/<int:pk>/cancel/', BookingCancelView.as_view(), name='api_booking_cancel_int'),

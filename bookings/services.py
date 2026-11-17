@@ -615,12 +615,14 @@ def partner_accept_booking(booking: Booking, partner_user):
 
 
 def _refund_advance(locked, note):
-    if locked.advance_amount_paid > Decimal('0.00') and not locked.payments.filter(payment_type='REFUND').exists():
+    """Refund everything actually paid (advance, plus any balance / full payment already collected)."""
+    paid = locked.amount_paid
+    if paid > Decimal('0.00') and not locked.payments.filter(payment_type='REFUND').exists():
         Payment.objects.create(
             payment_id=_ref('REF'),
             booking=locked,
             payment_type='REFUND',
-            amount=locked.advance_amount_paid,
+            amount=paid,
             payment_mode='ONLINE',
             status='SUCCESS',
             gateway_transaction_id=f"REFUND-TXN-{uuid.uuid4().hex[:8].upper()}",
@@ -652,8 +654,82 @@ def partner_reject_booking(booking: Booking, partner_user, reason: str):
 
     notify(locked.user, 'PARTNER_REJECTION', 'Booking Rejected by Partner Centre',
            f"Your booking {locked.booking_id} could not be confirmed by {locked.partner.centre_name}. "
-           f"Reason: {reason}. Full refund of advance payment ₹{locked.advance_amount_paid} has been processed.",
+           f"Reason: {reason}. "
+           + (f"A full refund of ₹{locked.amount_paid} has been processed." if locked.amount_paid > 0 else "No payment was taken."),
            booking=locked, push=True)
+    return booking, None
+
+
+# ── Pay at collection ───────────────────────────────────────────────
+
+PAY_LATER = 'PAY_AT_COLLECTION'
+
+
+def pay_at_collection_eligibility(partner, total_amount, user=None):
+    """
+    Can this booking skip the online advance and be paid to the collector / at the centre?
+    Returns (available: bool, reason: str). Guard-rails, all configurable:
+      PAY_AT_COLLECTION_ENABLED     (default True)
+      PAY_AT_COLLECTION_MAX_AMOUNT  (default 5000)  — cap the no-show risk
+      PAY_AT_COLLECTION_MAX_OPEN    (default 2)     — unpaid pay-later bookings per patient
+      partner.accepts_pay_at_collection
+    """
+    if not getattr(settings, 'PAY_AT_COLLECTION_ENABLED', True):
+        return False, "Pay at collection is currently unavailable."
+    if partner is not None and not getattr(partner, 'accepts_pay_at_collection', True):
+        return False, "This centre accepts online advance payment only."
+    cap = Decimal(str(getattr(settings, 'PAY_AT_COLLECTION_MAX_AMOUNT', 5000)))
+    if total_amount is not None and Decimal(str(total_amount)) > cap:
+        return False, f"Pay at collection is available for bookings up to ₹{cap:,.0f}. Please pay the advance online."
+    if user is not None and getattr(user, 'is_authenticated', False):
+        max_open = int(getattr(settings, 'PAY_AT_COLLECTION_MAX_OPEN', 2))
+        open_unpaid = Booking.objects.filter(
+            user=user, payment_plan=PAY_LATER, payment_status='PENDING',
+            booking_status__in=wf.ACTIVE,
+        ).count()
+        if open_unpaid >= max_open:
+            return False, f"You already have {open_unpaid} unpaid pay-at-collection bookings. Please pay online for this one."
+    return True, ''
+
+
+@transaction.atomic
+def choose_pay_at_collection(booking: Booking, user):
+    """
+    Patient books now and pays the full amount at collection (cash / UPI to the
+    collector, or at the centre). Skips the online advance; the slot seat is
+    claimed under lock exactly as an advance payment would.
+    """
+    locked = _lock(booking)
+    if locked.booking_status != wf.AWAITING_ADVANCE_PAYMENT:
+        return None, f"Payment option can only be chosen before the booking is submitted (current: {wf.LABELS.get(locked.booking_status)})."
+    ok, reason = pay_at_collection_eligibility(locked.partner, locked.total_amount, user)
+    if not ok:
+        return None, reason
+
+    if locked.slot_id:
+        slot = PartnerSlot.objects.select_for_update().get(pk=locked.slot_id)
+        if not slot.is_available:
+            return None, "This time slot just filled up. Please choose another slot."
+        slot.booked_count += 1
+        slot.save(update_fields=['booked_count'])
+
+    now = timezone.now()
+    locked.payment_plan = PAY_LATER
+    locked.booking_status = wf.AWAITING_PARTNER_CONFIRMATION
+    locked.status_changed_at = now
+    locked.save(update_fields=['payment_plan', 'booking_status', 'status_changed_at', 'updated_at'])
+    log_status(locked, wf.AWAITING_ADVANCE_PAYMENT, wf.AWAITING_PARTNER_CONFIRMATION, actor=user,
+               actor_role=wf.PATIENT, notes='Pay at collection selected.', metadata={'payment_plan': PAY_LATER})
+    _sync(booking, locked)
+
+    where = 'to the sample collector' if locked.service_mode == 'HOME_COLLECTION' else 'at the centre'
+    notify(locked.user, 'PAYMENT_RESULT', 'Booking request sent',
+           f"Booking {locked.booking_id} is awaiting partner confirmation. Pay ₹{locked.total_amount} {where} "
+           "(cash or UPI), or pay online any time after the lab confirms.", booking=locked)
+    if locked.partner.user_id:
+        notify(locked.partner.user, 'BOOKING_REMINDER', 'New booking · pay at collection',
+               f"New booking {locked.booking_id} from {locked.patient_name}. Collect ₹{locked.total_amount} {where}.",
+               booking=locked, push=True)
     return booking, None
 
 
@@ -684,7 +760,7 @@ def cancel_booking(booking: Booking, user, reason: str, actor_role=wf.PATIENT):
 
     notify(locked.user, 'BOOKING_CANCELLED', 'Booking Cancelled',
            f"Booking {locked.booking_id} has been cancelled."
-           + (f" A refund of ₹{locked.advance_amount_paid} will be credited within 3-5 working days." if refunded else ""),
+           + (f" A refund of ₹{locked.amount_paid} will be credited within 3-5 working days." if refunded else ""),
            booking=locked)
     if previous != wf.AWAITING_ADVANCE_PAYMENT and locked.partner.user_id:
         notify(locked.partner.user, 'BOOKING_CANCELLED', 'Booking Cancelled by Patient',
@@ -887,29 +963,41 @@ def generate_1mindoc_pdf_report(booking: Booking) -> bytes:
 
 
 
+def payable_statuses(booking):
+    """Prepaid: settle once the sample is collected. Pay-at-collection: any time after the lab confirms."""
+    if booking.payment_plan == PAY_LATER:
+        return {wf.CONFIRMED} | wf.BALANCE_PAYABLE
+    return wf.BALANCE_PAYABLE
+
+
 @transaction.atomic
 def process_balance_payment(booking: Booking, payment_mode='ONLINE', gateway_transaction_id=None, offline_reference=None, recorded_by_partner=False):
     """
-    70% balance — online by the patient or recorded offline by the partner.
-    Payable from sample collection onwards; never on a cancelled booking.
+    Settle everything still owed — online by the patient, or recorded offline
+    (cash / UPI / card) by the partner.
+      prepaid booking         → the 70% balance           (payment_type BALANCE_70)
+      pay-at-collection       → the full booking amount   (payment_type FULL)
     """
     locked = _lock(booking)
     if locked.booking_status in wf.VOID:
-        return None, "This booking is cancelled; no balance is due."
-    if locked.booking_status not in wf.BALANCE_PAYABLE:
+        return None, "This booking is cancelled; no payment is due."
+    if locked.booking_status not in payable_statuses(locked):
+        if locked.payment_plan == PAY_LATER:
+            return None, "Payment can be made once the lab confirms your booking."
         return None, "The balance can be paid once your sample has been collected."
     if locked.payment_status == 'FULLY_PAID':
-        return None, "Balance has already been fully paid for this booking."
+        return None, "This booking is already fully paid."
 
-    balance_due = locked.balance_amount_due - locked.balance_amount_paid
-    if balance_due <= Decimal('0.00'):
-        return None, "No outstanding balance for this booking."
+    due = locked.amount_outstanding
+    if due <= Decimal('0.00'):
+        return None, "No outstanding amount for this booking."
 
+    is_full = locked.advance_amount_paid <= Decimal('0.00')
     payment = Payment.objects.create(
         payment_id=_ref('PAY'),
         booking=locked,
-        payment_type='BALANCE_70',
-        amount=balance_due,
+        payment_type='FULL' if is_full else 'BALANCE_70',
+        amount=due,
         payment_mode=payment_mode,
         status='SUCCESS',
         gateway_transaction_id=gateway_transaction_id or f"TXN-{uuid.uuid4().hex[:8].upper()}",
@@ -917,12 +1005,14 @@ def process_balance_payment(booking: Booking, payment_mode='ONLINE', gateway_tra
         recorded_by_partner=recorded_by_partner,
     )
 
-    locked.balance_amount_paid += balance_due
+    # Keep the 30/70 ledger meaningful for reporting even when paid in one go.
+    locked.advance_amount_paid = locked.advance_amount_due
+    locked.balance_amount_paid = locked.total_amount - locked.advance_amount_due
     locked.payment_status = 'FULLY_PAID'
-    locked.save(update_fields=['balance_amount_paid', 'payment_status', 'updated_at'])
+    locked.save(update_fields=['advance_amount_paid', 'balance_amount_paid', 'payment_status', 'updated_at'])
     _sync(booking, locked)
 
-    notify(locked.user, 'PAYMENT_RESULT', 'Balance Payment (70%) Received - Booking Fully Paid',
-           f"Final 70% payment of ₹{balance_due} received. Booking {locked.booking_id} is now fully settled.",
-           booking=locked)
+    how = 'collected by the lab' if recorded_by_partner else 'received'
+    notify(locked.user, 'PAYMENT_RESULT', 'Payment received · booking fully paid',
+           f"Payment of ₹{due} {how} for booking {locked.booking_id}. Nothing more is due.", booking=locked)
     return payment, None

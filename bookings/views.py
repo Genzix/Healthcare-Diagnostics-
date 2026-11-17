@@ -39,6 +39,8 @@ from .services import (
     record_report_download,
     report_access,
     cancel_booking,
+    choose_pay_at_collection,
+    pay_at_collection_eligibility,
     process_balance_payment,
     send_system_notification,
 )
@@ -82,9 +84,9 @@ def workflow_error_response(exc: WorkflowError):
     )
 
 
-def booking_payload(booking, audience, **extra):
+def booking_payload(booking, audience, user=None, **extra):
     fresh = booking_queryset().get(pk=booking.pk)
-    return {"success": True, "booking": BookingDetailSerializer(fresh, context={'audience': audience}).data, **extra}
+    return {"success": True, "booking": BookingDetailSerializer(fresh, context={'audience': audience, 'user': user}).data, **extra}
 
 
 def get_user_booking(user, pk):
@@ -123,6 +125,8 @@ class PriceEstimateView(APIView):
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
 
+        ok, reason = pay_at_collection_eligibility(partner, pricing['total_amount'], request.user)
+        pricing['pay_at_collection'] = {'available': ok, 'reason': reason}
         return Response({"success": True, "estimate": pricing}, status=status.HTTP_200_OK)
 
 
@@ -137,13 +141,18 @@ class BookingListCreateView(APIView):
     VIEW_GROUPS = {'upcoming': 'active', 'active': 'active', 'completed': 'completed', 'cancelled': 'cancelled', 'in_lab': 'in_lab'}
 
     def get(self, request, *args, **kwargs):
-        queryset = Booking.objects.filter(user=request.user).select_related('partner', 'slot').prefetch_related('items')
+        queryset = booking_queryset().filter(user=request.user)
         view_mode = request.query_params.get('view')
         if view_mode in self.VIEW_GROUPS:
             queryset = filter_by_status(queryset, self.VIEW_GROUPS[view_mode])
         queryset = filter_by_status(queryset, request.query_params.get('status'))
 
-        serializer = BookingListSerializer(queryset, many=True)
+        # Full (patient-audience) payload: the tracking UI needs history + report state per row.
+        # ?compact=1 keeps the slim list shape for lightweight clients.
+        if request.query_params.get('compact') in ('1', 'true'):
+            serializer = BookingListSerializer(queryset, many=True)
+        else:
+            serializer = BookingDetailSerializer(queryset, many=True, context={'audience': wf.PATIENT})
         return Response({"success": True, "count": len(serializer.data), "bookings": serializer.data}, status=status.HTTP_200_OK)
 
     def post(self, request, *args, **kwargs):
@@ -156,7 +165,7 @@ class BookingListCreateView(APIView):
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(
-            booking_payload(booking, wf.PATIENT, message="Booking order created. Please pay 30% advance to submit your booking request."),
+            booking_payload(booking, wf.PATIENT, user=request.user, message="Booking order created. Pay the 30% advance online, or choose pay at collection."),
             status=status.HTTP_201_CREATED,
         )
 
@@ -169,7 +178,26 @@ class BookingDetailView(APIView):
         booking = get_user_booking(request.user, pk)
         if not booking:
             return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
-        return Response({"success": True, "booking": BookingDetailSerializer(booking, context={'audience': wf.PATIENT}).data})
+        return Response({"success": True, "booking": BookingDetailSerializer(booking, context={'audience': wf.PATIENT, 'user': request.user}).data})
+
+
+class PayAtCollectionView(APIView):
+    """
+    POST /api/bookings/<id>/pay-at-collection/
+    Submit the booking without an online advance; the full amount is paid in cash / UPI
+    to the collector or at the centre (or online later). Eligibility is enforced server-side.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        booking = get_user_booking(request.user, pk)
+        if not booking:
+            return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+        booking, error = choose_pay_at_collection(booking, request.user)
+        if error:
+            return Response({"success": False, "message": error, "code": "pay_at_collection_unavailable"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(booking_payload(booking, wf.PATIENT, user=request.user,
+                                        message="Booking request sent. Pay at collection or online after the lab confirms."))
 
 
 class PayAdvanceView(APIView):
@@ -223,7 +251,7 @@ class PayBalanceView(APIView):
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(booking_payload(
-            booking, wf.PATIENT, message="70% balance paid successfully. Booking fully settled.",
+            booking, wf.PATIENT, message="Payment successful. Booking fully paid.",
             payment=PaymentSerializer(payment).data,
         ))
 

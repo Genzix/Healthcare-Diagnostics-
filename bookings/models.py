@@ -33,6 +33,11 @@ class Booking(models.Model):
 
     BOOKING_STATUS_CHOICES = workflow.STATUS_CHOICES
 
+    PAYMENT_PLAN_CHOICES = (
+        ('PREPAID_ADVANCE', 'Online advance (30%) now, balance later'),
+        ('PAY_AT_COLLECTION', 'Pay at collection (cash / UPI to collector or at centre)'),
+    )
+
     PAYMENT_STATUS_CHOICES = (
         ('PENDING', 'Payment Pending'),
         ('ADVANCE_PAID', 'Advance 30% Paid'),
@@ -137,6 +142,7 @@ class Booking(models.Model):
         default='PENDING',
         db_index=True
     )
+    payment_plan = models.CharField(max_length=20, choices=PAYMENT_PLAN_CHOICES, default='PREPAID_ADVANCE', db_index=True)
 
     # Rejection & Cancellation
     partner_rejection_reason = models.TextField(blank=True)
@@ -187,6 +193,17 @@ class Booking(models.Model):
     @property
     def is_report_released(self):
         return self.booking_status in workflow.REPORT_RELEASED
+
+    @property
+    def amount_paid(self):
+        return (self.advance_amount_paid or Decimal('0.00')) + (self.balance_amount_paid or Decimal('0.00'))
+
+    @property
+    def amount_outstanding(self):
+        """What the patient still owes — the whole total on a pay-at-collection booking, the 70% on a prepaid one."""
+        if self.booking_status in workflow.VOID:
+            return Decimal('0.00')
+        return max(self.total_amount - self.amount_paid, Decimal('0.00'))
 
     def __str__(self):
         return f"{self.booking_id} | {self.patient_name} | {self.partner.centre_name} - {self.booking_status}"
@@ -253,6 +270,7 @@ class Payment(models.Model):
     PAYMENT_TYPE_CHOICES = (
         ('ADVANCE_30', '30% Advance Payment'),
         ('BALANCE_70', '70% Balance Payment'),
+        ('FULL', 'Full Payment (pay at collection)'),
         ('REFUND', 'Refund Payment'),
     )
 

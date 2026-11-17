@@ -40,6 +40,10 @@ class DiagnosticPartner(models.Model):
         default=0.00,
         help_text="Flat fee charged for home collection"
     )
+    accepts_pay_at_collection = models.BooleanField(
+        default=True,
+        help_text="Allow patients to book without an online advance and pay cash / UPI to the collector or at the centre"
+    )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

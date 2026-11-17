@@ -64,6 +64,9 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     has_report = serializers.SerializerMethodField()
     report_notes = serializers.SerializerMethodField()
     report_verified_by_name = serializers.SerializerMethodField()
+    amount_paid = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    amount_outstanding = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    payment_options = serializers.SerializerMethodField()
 
     # Never expose the raw /media/ path: reports are fetched through the
     # authenticated download endpoint, which enforces who may see them.
@@ -79,7 +82,8 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             'booking_date', 'slot_start_time', 'slot_end_time',
             'subtotal_amount', 'home_collection_fee', 'discount_amount', 'total_amount',
             'advance_amount_due', 'advance_amount_paid', 'balance_amount_due', 'balance_amount_paid',
-            'booking_status', 'status_label', 'payment_status', 'lab_progress', 'next_actions', 'can_cancel',
+            'booking_status', 'status_label', 'payment_status', 'payment_plan', 'amount_paid', 'amount_outstanding',
+            'payment_options', 'lab_progress', 'next_actions', 'can_cancel',
             'partner_rejection_reason', 'cancelled_by', 'cancellation_reason', 'cancellation_time',
             'has_report', 'report_download_url', 'report_name', 'report_notes', 'report_uploaded_at',
             'report_file_size', 'report_file_sha256',
@@ -106,6 +110,21 @@ class BookingDetailSerializer(serializers.ModelSerializer):
 
     def get_lab_progress(self, obj):
         return wf.progress(obj.booking_status)
+
+    def get_payment_options(self, obj):
+        """What the patient can do about payment right now — drives the pay buttons."""
+        from .services import pay_at_collection_eligibility, payable_statuses
+        out = {
+            'can_pay_advance': obj.booking_status == wf.AWAITING_ADVANCE_PAYMENT,
+            'can_pay_outstanding': obj.payment_status != 'FULLY_PAID' and obj.amount_outstanding > 0
+                                   and obj.booking_status in payable_statuses(obj),
+            'pay_at_collection': None,
+        }
+        if obj.booking_status == wf.AWAITING_ADVANCE_PAYMENT:
+            user = (self.context or {}).get('user')
+            ok, reason = pay_at_collection_eligibility(obj.partner, obj.total_amount, user)
+            out['pay_at_collection'] = {'available': ok, 'reason': reason}
+        return out
 
     def get_status_history(self, obj):
         logs = obj.status_logs.all()
@@ -160,6 +179,7 @@ class BookingListSerializer(serializers.ModelSerializer):
             'booking_status',
             'status_label',
             'payment_status',
+            'payment_plan',
             'lab_progress',
             'has_report',
             'items_count',
