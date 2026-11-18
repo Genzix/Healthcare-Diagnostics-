@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 
@@ -53,6 +54,8 @@ from .services import (
     cancel_group,
 )
 from partners.models import DiagnosticPartner
+
+logger = logging.getLogger(__name__)
 
 
 # =====================================================================
@@ -135,7 +138,14 @@ class PriceEstimateView(APIView):
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
         pricing = public_pricing(pricing)
 
-        ok, reason = pay_at_collection_eligibility(partner, pricing['total_amount'], request.user)
+        # Pay-at-collection is an optional add-on to the estimate: if the eligibility
+        # check fails, still return the price and fail closed (advance-only) rather
+        # than blocking checkout. The booking endpoint re-checks eligibility anyway.
+        try:
+            ok, reason = pay_at_collection_eligibility(partner, pricing['total_amount'], request.user)
+        except Exception:
+            logger.exception("pay_at_collection_eligibility failed (partner=%s, user=%s)", partner.pk, getattr(request.user, 'pk', None))
+            ok, reason = False, "Pay at collection is unavailable right now. Please pay the advance online."
         pricing['pay_at_collection'] = {'available': ok, 'reason': reason}
         return Response({"success": True, "estimate": pricing}, status=status.HTTP_200_OK)
 
