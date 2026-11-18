@@ -546,3 +546,152 @@ class FamilyMemberPhoneVerificationTests(TestCase):
     def test_send_requires_auth(self):
         res = APIClient().post(self.SEND, {'phone_number': '9123456780'})
         self.assertIn(res.status_code, (401, 403))
+
+
+from unittest import mock  # noqa: E402
+
+
+class SavedAddressTests(TestCase):
+    URL = '/api/addresses/'
+
+    def setUp(self):
+        self.user = User.objects.create_user(phone_number='+919876543210', first_name='Asha', is_phone_verified=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def _body(self, **kw):
+        return {
+            'label': 'HOME', 'house': 'Flat 402, Sai Residency', 'area': 'MVP Colony', 'landmark': 'Opp. park',
+            'city': 'Visakhapatnam', 'state': 'Andhra Pradesh', 'pincode': '530017',
+            'latitude': 17.7409123456789, 'longitude': 83.3360987654321, 'location_source': 'GPS', **kw,
+        }
+
+    def _add(self, **kw):
+        return self.client.post(self.URL, self._body(**kw), format='json')
+
+    def test_first_address_becomes_default_and_mirrors_profile(self):
+        res = self._add()
+        self.assertEqual(res.status_code, 201, res.data)
+        a = res.data['address']
+        self.assertTrue(a['is_default'])
+        self.assertEqual(str(a['latitude']), '17.740912')  # rounded to 6 dp
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.pincode, '530017')
+        self.assertIn('Flat 402', self.user.address)
+
+    def test_location_required(self):
+        res = self._add(latitude=None, longitude=None)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('latitude', res.data['errors'])
+
+    def test_outside_india_rejected(self):
+        res = self._add(latitude=51.5, longitude=-0.12)
+        self.assertEqual(res.status_code, 400)
+
+    def test_invalid_pincode(self):
+        self.assertEqual(self._add(pincode='012345').status_code, 400)
+
+    def test_second_home_conflicts_then_replace(self):
+        first = self._add().data['address']['id']
+        res = self._add(house='New house')
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data['code'], 'label_taken')
+        self.assertEqual(res.data['existing_id'], first)
+        res = self.client.post(self.URL + '?replace_label=true', self._body(house='New house'), format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        from accounts.models import UserAddress
+        old = UserAddress.objects.get(pk=first)
+        self.assertEqual(old.label, 'OTHER')
+
+    def test_other_requires_name_and_allows_many(self):
+        self.assertEqual(self._add(label='OTHER').status_code, 400)
+        self.assertEqual(self._add(label='OTHER', custom_label="Mom's").status_code, 201)
+        self.assertEqual(self._add(label='OTHER', custom_label='Gym').status_code, 201)
+
+    def test_set_default_is_exclusive(self):
+        a = self._add().data['address']['id']
+        b = self._add(label='WORK', city='Hyderabad', pincode='500081').data['address']['id']
+        res = self.client.post(f'{self.URL}{b}/set-default/')
+        self.assertEqual(res.status_code, 200)
+        defaults = [x['id'] for x in res.data['addresses'] if x['is_default']]
+        self.assertEqual(defaults, [b])
+        self.assertEqual(res.data['addresses'][0]['id'], b)  # default listed first
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.city, 'Hyderabad')
+        self.assertNotEqual(a, b)
+
+    def test_delete_default_promotes_another(self):
+        a = self._add().data['address']['id']
+        b = self._add(label='WORK').data['address']['id']
+        res = self.client.delete(f'{self.URL}{a}/')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data['new_default_id'], b)
+
+    def test_cannot_touch_other_users_address(self):
+        a = self._add().data['address']['id']
+        other = User.objects.create_user(phone_number='+919000000001', is_phone_verified=True)
+        c = APIClient(); c.force_authenticate(other)
+        self.assertEqual(c.patch(f'{self.URL}{a}/', {'house': 'x'}, format='json').status_code, 404)
+        self.assertEqual(c.delete(f'{self.URL}{a}/').status_code, 404)
+
+    def test_receiver_phone_needs_name(self):
+        res = self._add(receiver_phone='9123456780')
+        self.assertEqual(res.status_code, 400)
+        res = self._add(receiver_phone='9123456780', receiver_name='Ravi')
+        self.assertEqual(res.data['address']['receiver_phone'], '+919123456780')
+
+    def test_legacy_address_must_be_pinned_on_edit(self):
+        from accounts.models import UserAddress
+        legacy = UserAddress.objects.create(user=self.user, house='16-32', city='Anakapalli', pincode='531001', location_source='LEGACY', is_default=True)
+        res = self.client.patch(f'{self.URL}{legacy.pk}/', {'house': '16-33'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        res = self.client.patch(f'{self.URL}{legacy.pk}/', {'house': '16-33', 'latitude': 17.69, 'longitude': 83.0, 'location_source': 'MAP'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+
+    @mock.patch('accounts.addresses.requests.get')
+    def test_reverse_geocode_parses_and_caches(self, get):
+        from django.core.cache import cache
+        cache.clear()
+        get.return_value.json.return_value = {
+            'lat': '17.74', 'lon': '83.33', 'display_name': 'MVP Colony, Visakhapatnam',
+            'address': {'road': 'Sector 6', 'suburb': 'MVP Colony', 'city': 'Visakhapatnam', 'state': 'Andhra Pradesh', 'postcode': '530017', 'country_code': 'in'},
+        }
+        get.return_value.raise_for_status.return_value = None
+        res = self.client.get('/api/addresses/reverse-geocode/?lat=17.7409&lng=83.3361')
+        self.assertEqual(res.status_code, 200, res.data)
+        r = res.data['result']
+        self.assertEqual(r['pincode'], '530017')
+        self.assertEqual(r['city'], 'Visakhapatnam')
+        self.assertEqual(r['latitude'], 17.7409)  # user's pin, not the geocoder's
+        self.client.get('/api/addresses/reverse-geocode/?lat=17.7409&lng=83.3361')
+        self.assertEqual(get.call_count, 1)
+
+    @mock.patch('accounts.addresses.requests.get')
+    def test_geocoder_down_returns_503(self, get):
+        import requests as rq
+        from django.core.cache import cache
+        cache.clear()
+        get.side_effect = rq.ConnectionError('down')
+        res = self.client.get('/api/addresses/search/?q=mvp colony')
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.data['code'], 'geocoder_unavailable')
+
+    def test_short_search_returns_empty_without_calling_provider(self):
+        with mock.patch('accounts.addresses.requests.get') as get:
+            res = self.client.get('/api/addresses/search/?q=mv')
+        self.assertEqual(res.data['results'], [])
+        get.assert_not_called()
+
+    def test_legacy_profile_address_migration(self):
+        import importlib
+        from django.apps import apps as global_apps
+        from accounts.models import UserAddress
+        mig = importlib.import_module('accounts.migrations.0007_migrate_profile_addresses')
+        u = User.objects.create_user(phone_number='+919000000055', address='16-32, mvpeta, Anakapalli, 531001', city='Anakapalli', pincode='531001')
+        User.objects.create_user(phone_number='+919000000056', address='somewhere', city='', pincode='')  # skipped
+        mig.forwards(global_apps, None)
+        mig.forwards(global_apps, None)  # idempotent
+        rows = UserAddress.objects.filter(user=u)
+        self.assertEqual(rows.count(), 1)
+        a = rows.get()
+        self.assertEqual((a.house, a.area, a.pincode, a.is_default, a.has_location), ('16-32', 'mvpeta', '531001', True, False))

@@ -441,11 +441,30 @@ def create_booking_order(user, data: dict):
     centre_name_snapshot = ""
     centre_address_snapshot = ""
 
+    saved_address = None
+    collection_latitude = collection_longitude = None
+    collection_contact_name = collection_contact_phone = ""
+
     if service_mode == 'HOME_COLLECTION':
-        collection_address = data.get('collection_address', '').strip()
-        collection_city = data.get('collection_city', '').strip()
-        collection_pincode = str(data.get('collection_pincode', '')).strip()
-        collection_landmark = data.get('collection_landmark', '').strip()
+        address_id = data.get('address_id')
+        if address_id:
+            from accounts.models import UserAddress
+            saved_address = UserAddress.objects.filter(pk=address_id, user=user).first()
+            if not saved_address:
+                return None, "Selected address not found. Please choose another address."
+            collection_address = ', '.join(p for p in [saved_address.house, saved_address.area] if p)
+            collection_city = saved_address.city
+            collection_pincode = saved_address.pincode
+            collection_landmark = saved_address.landmark
+            collection_latitude = saved_address.latitude
+            collection_longitude = saved_address.longitude
+            collection_contact_name = saved_address.receiver_name
+            collection_contact_phone = saved_address.receiver_phone
+        else:
+            collection_address = (data.get('collection_address') or '').strip()
+            collection_city = (data.get('collection_city') or '').strip()
+            collection_pincode = str(data.get('collection_pincode') or '').strip()
+            collection_landmark = (data.get('collection_landmark') or '').strip()
 
         if not collection_address or not collection_pincode:
             return None, "Collection address and pincode are required for home collection."
@@ -499,6 +518,11 @@ def create_booking_order(user, data: dict):
         collection_city=collection_city,
         collection_pincode=collection_pincode,
         collection_landmark=collection_landmark,
+        collection_latitude=collection_latitude,
+        collection_longitude=collection_longitude,
+        collection_address_ref=saved_address,
+        collection_contact_name=collection_contact_name,
+        collection_contact_phone=collection_contact_phone,
         centre_name_snapshot=centre_name_snapshot,
         centre_address_snapshot=centre_address_snapshot,
         booking_date=slot.date,
@@ -513,6 +537,10 @@ def create_booking_order(user, data: dict):
         booking_status='AWAITING_ADVANCE_PAYMENT',
         payment_status='PENDING',
     )
+
+    if saved_address:
+        from accounts.addresses import touch_address
+        touch_address(saved_address)
 
     # Create Booking Items
     for item in pricing_data['items']:

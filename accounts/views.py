@@ -5,6 +5,7 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import UserRateThrottle
 
 from .models import (
     User,
@@ -12,6 +13,7 @@ from .models import (
     HealthCardProfile,
     HealthMetricHistory,
     HealthCardShare,
+    UserAddress,
     ensure_health_card_tables,
     ensure_support_tables,
 )
@@ -33,6 +35,7 @@ from .serializers import (
     ActivityInputSerializer,
     SleepInputSerializer,
     ShareCreateSerializer,
+    UserAddressSerializer,
 )
 from .services import (
     normalize_phone_number,
@@ -43,6 +46,14 @@ from .services import (
     verify_login_otp,
     authenticate_with_password,
     get_tokens_for_user,
+)
+from .addresses import (
+    AddressError,
+    delete_address,
+    reverse_geocode,
+    save_address,
+    search_places,
+    set_default_address,
 )
 from .family_phone import (
     FamilyPhoneError,
@@ -1528,3 +1539,145 @@ class AdminMeProfileView(APIView):
 
 
 
+
+
+# ============================================================================
+# Saved Addresses (address book) + geocoding proxy
+# ============================================================================
+
+class GeocodeThrottle(UserRateThrottle):
+    scope = 'geocode'
+    rate = '90/min'
+
+    def get_rate(self):
+        return self.rate
+
+
+def _address_error(e: AddressError):
+    body = {"success": False, "code": e.code, "message": e.message, **e.extra}
+    if e.field:
+        body["errors"] = {e.field: [e.message]}
+    return Response(body, status=e.status)
+
+
+def _address_list_payload(user):
+    qs = UserAddress.objects.filter(user=user)
+    data = UserAddressSerializer(qs, many=True).data
+    return {"success": True, "count": len(data), "max_addresses": UserAddress.MAX_PER_USER, "addresses": data}
+
+
+def _wants_replace(request):
+    v = request.data.get('replace_label', request.query_params.get('replace_label'))
+    return str(v).lower() in ('1', 'true', 'yes')
+
+
+class AddressListCreateView(APIView):
+    """
+    GET  /api/addresses/  → all saved addresses (default first, then recently used)
+    POST /api/addresses/  → add one. `replace_label=true` takes over an existing Home/Work.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        return Response(_address_list_payload(request.user), status=status.HTTP_200_OK)
+
+    def post(self, request, *args, **kwargs):
+        serializer = UserAddressSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"success": False, "errors": serializer.errors, "message": "Please check the address details."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            obj = save_address(request.user, dict(serializer.validated_data), replace_label=_wants_replace(request))
+        except AddressError as e:
+            return _address_error(e)
+        return Response(
+            {"success": True, "message": f"{obj.display_label} address saved.", "address": UserAddressSerializer(obj).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AddressDetailView(APIView):
+    """GET / PATCH / PUT / DELETE /api/addresses/<id>/"""
+    permission_classes = [IsAuthenticated]
+
+    def _get(self, request, pk):
+        return UserAddress.objects.filter(user=request.user, pk=pk).first()
+
+    def get(self, request, pk, *args, **kwargs):
+        obj = self._get(request, pk)
+        if not obj:
+            return Response({"success": False, "message": "Address not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response({"success": True, "address": UserAddressSerializer(obj).data})
+
+    def put(self, request, pk, *args, **kwargs):
+        return self.patch(request, pk, *args, **kwargs)
+
+    def patch(self, request, pk, *args, **kwargs):
+        obj = self._get(request, pk)
+        if not obj:
+            return Response({"success": False, "message": "Address not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = UserAddressSerializer(obj, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return Response(
+                {"success": False, "errors": serializer.errors, "message": "Please check the address details."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            obj = save_address(request.user, dict(serializer.validated_data), instance=obj, replace_label=_wants_replace(request))
+        except AddressError as e:
+            return _address_error(e)
+        return Response({"success": True, "message": "Address updated.", "address": UserAddressSerializer(obj).data})
+
+    def delete(self, request, pk, *args, **kwargs):
+        try:
+            promoted = delete_address(request.user, pk)
+        except AddressError as e:
+            return _address_error(e)
+        payload = _address_list_payload(request.user)
+        payload["message"] = "Address removed."
+        payload["new_default_id"] = promoted.pk if promoted else None
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class AddressSetDefaultView(APIView):
+    """POST /api/addresses/<id>/set-default/"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, *args, **kwargs):
+        try:
+            obj = set_default_address(request.user, pk)
+        except AddressError as e:
+            return _address_error(e)
+        payload = _address_list_payload(request.user)
+        payload["message"] = f"{obj.display_label} is now your default address."
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class ReverseGeocodeView(APIView):
+    """GET /api/addresses/reverse-geocode/?lat=..&lng=.. → structured address for a map pin."""
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [GeocodeThrottle]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            result = reverse_geocode(request.query_params.get('lat'), request.query_params.get('lng'))
+        except AddressError as e:
+            return _address_error(e)
+        return Response({"success": True, "result": result})
+
+
+class PlaceSearchView(APIView):
+    """GET /api/addresses/search/?q=..&lat=..&lng=.. → places matching q, biased near lat/lng."""
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [GeocodeThrottle]
+
+    def get(self, request, *args, **kwargs):
+        q = request.query_params.get('q', '')
+        lat, lng = request.query_params.get('lat'), request.query_params.get('lng')
+        try:
+            results = search_places(q, near=(lat, lng) if lat and lng else None)
+        except AddressError as e:
+            return _address_error(e)
+        return Response({"success": True, "count": len(results), "results": results})

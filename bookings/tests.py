@@ -773,6 +773,35 @@ class PayAtCollectionTests(TestCase):
         self.assertEqual(res.status_code, 201, res.data)
         return res.data['booking']
 
+    def test_saved_address_is_snapshotted_with_pin(self):
+        from accounts.models import UserAddress
+        addr = UserAddress.objects.create(
+            user=self.user, label='HOME', house='Flat 9', area='Madhapur', landmark='Near metro', city='Hyderabad',
+            pincode='500081', latitude=Decimal('17.448300'), longitude=Decimal('78.391500'), is_default=True,
+            receiver_name='Ravi', receiver_phone='+919123456780',
+        )
+        # Free-text fields are ignored when address_id is given.
+        b = self.create_via_api(address_id=addr.id, collection_address='ignored', collection_pincode='999999')
+        self.assertEqual(b['collection_address'], 'Flat 9, Madhapur')
+        self.assertEqual(b['collection_pincode'], '500081')
+        self.assertEqual(b['collection_landmark'], 'Near metro')
+        self.assertEqual(Decimal(str(b['collection_latitude'])), Decimal('17.448300'))
+        self.assertIn('destination=17.448300,78.391500', b['collection_maps_url'])
+        self.assertEqual(b['collection_contact_name'], 'Ravi')
+        addr.refresh_from_db()
+        self.assertIsNotNone(addr.last_used_at)
+
+    def test_someone_elses_address_id_rejected(self):
+        from accounts.models import UserAddress
+        other = User.objects.create_user(phone_number='+919000000077', is_phone_verified=True)
+        addr = UserAddress.objects.create(user=other, house='x', city='Hyderabad', pincode='500081', is_default=True)
+        body = {
+            'patient_type': 'SELF', 'partner_id': self.partner.id, 'service_mode': 'HOME_COLLECTION',
+            'slot_id': self.slot.id, 'test_ids': [self.test1.id], 'address_id': addr.id,
+        }
+        res = self.client.post('/api/bookings/', body, format='json')
+        self.assertEqual(res.status_code, 400)
+
     def test_frontend_create_payload_offers_pay_at_collection(self):
         b = self.create_via_api()
         self.assertEqual(b['booking_status'], 'AWAITING_ADVANCE_PAYMENT')

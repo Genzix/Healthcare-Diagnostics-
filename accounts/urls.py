@@ -18,6 +18,11 @@ from .views import (
     FamilyMemberDetailView,
     FamilyPhoneSendOTPView,
     FamilyPhoneVerifyOTPView,
+    AddressListCreateView,
+    AddressDetailView,
+    AddressSetDefaultView,
+    ReverseGeocodeView,
+    PlaceSearchView,
     # Health Card Views
     HealthCardDetailView,
     HealthCardProfileUpdateView,
@@ -69,6 +74,13 @@ urlpatterns = [
     path('api/family-members/phone/send-otp/', FamilyPhoneSendOTPView.as_view(), name='api_family_phone_send_otp'),
     path('api/family-members/phone/verify-otp/', FamilyPhoneVerifyOTPView.as_view(), name='api_family_phone_verify_otp'),
     path('api/family-members/<int:pk>/', FamilyMemberDetailView.as_view(), name='api_family_member_detail'),
+
+    # Saved Addresses (address book) + geocoding
+    path('api/addresses/', AddressListCreateView.as_view(), name='api_addresses'),
+    path('api/addresses/reverse-geocode/', ReverseGeocodeView.as_view(), name='api_addresses_reverse_geocode'),
+    path('api/addresses/search/', PlaceSearchView.as_view(), name='api_addresses_search'),
+    path('api/addresses/<int:pk>/', AddressDetailView.as_view(), name='api_address_detail'),
+    path('api/addresses/<int:pk>/set-default/', AddressSetDefaultView.as_view(), name='api_address_set_default'),
 
     # Health Card Modules (1MinDoc Health Card)
     path('api/health-card/', HealthCardDetailView.as_view(), name='api_health_card_detail'),

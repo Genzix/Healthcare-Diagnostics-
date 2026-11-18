@@ -2,7 +2,7 @@ from django import forms
 from django.contrib import admin
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, PhoneOTP, FamilyMember
+from .models import User, PhoneOTP, FamilyMember, UserAddress
 
 
 class AdminEmailAuthenticationForm(AdminAuthenticationForm):
@@ -141,3 +141,16 @@ class PhoneOTPAdmin(admin.ModelAdmin):
     )
     ordering = ('-created_at',)
     readonly_fields = ('created_at',)
+
+
+@admin.register(UserAddress)
+class UserAddressAdmin(admin.ModelAdmin):
+    list_display = ('user', 'label', 'custom_label', 'house', 'city', 'pincode', 'is_default', 'location_source', 'has_location', 'last_used_at')
+    list_filter = ('label', 'is_default', 'location_source', 'city')
+    search_fields = ('user__phone_number', 'house', 'area', 'city', 'pincode', 'landmark')
+    raw_id_fields = ('user',)
+    readonly_fields = ('created_at', 'updated_at', 'last_used_at')
+
+    @admin.display(boolean=True, description='Pinned')
+    def has_location(self, obj):
+        return obj.has_location

@@ -54,6 +54,13 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     payments = PaymentSerializer(many=True, read_only=True)
     partner_name = serializers.CharField(source='partner.centre_name', read_only=True)
     partner_address = serializers.CharField(source='partner.address_line', read_only=True)
+    collection_maps_url = serializers.SerializerMethodField()
+
+    def get_collection_maps_url(self, obj):
+        lat, lng = getattr(obj, 'collection_latitude', None), getattr(obj, 'collection_longitude', None)
+        if lat is None or lng is None:
+            return ''
+        return f"https://www.google.com/maps/dir/?api=1&destination={lat},{lng}"
     partner_phone = serializers.CharField(source='partner.contact_phone', read_only=True)
     status_label = serializers.SerializerMethodField()
     lab_progress = serializers.SerializerMethodField()
@@ -78,6 +85,8 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             'id', 'booking_id', 'user', 'partner', 'partner_name', 'partner_address', 'partner_phone',
             'patient_type', 'family_member', 'patient_name', 'patient_age', 'patient_gender', 'patient_phone',
             'service_mode', 'collection_address', 'collection_city', 'collection_pincode', 'collection_landmark',
+            'collection_latitude', 'collection_longitude', 'collection_maps_url', 'collection_address_ref',
+            'collection_contact_name', 'collection_contact_phone',
             'centre_name_snapshot', 'centre_address_snapshot',
             'booking_date', 'slot_start_time', 'slot_end_time',
             'subtotal_amount', 'home_collection_fee', 'discount_amount', 'total_amount',
@@ -225,6 +234,8 @@ class BookingCreateSerializer(serializers.Serializer):
     collection_city = serializers.CharField(required=False, allow_blank=True)
     collection_pincode = serializers.CharField(required=False, allow_blank=True)
     collection_landmark = serializers.CharField(required=False, allow_blank=True)
+    # Preferred: a saved address id. Overrides the free-text fields above.
+    address_id = serializers.IntegerField(required=False, allow_null=True)
 
 
 class AdvancePaymentRequestSerializer(serializers.Serializer):

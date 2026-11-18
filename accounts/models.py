@@ -197,6 +197,103 @@ class FamilyMember(models.Model):
 
 
 
+class UserAddress(models.Model):
+    """
+    A saved, geo-pinned address (Swiggy/Zomato style address book).
+
+    - One HOME and one WORK per user; any number of OTHER (with a custom name).
+    - Exactly one default per user (DB-enforced); the default is mirrored onto
+      User.address/city/pincode for older screens.
+    - latitude/longitude come from the map pin the user confirmed, so the
+      collection technician can navigate to the door, not just the pincode.
+    """
+    LABEL_CHOICES = (
+        ('HOME', 'Home'),
+        ('WORK', 'Work'),
+        ('OTHER', 'Other'),
+    )
+    SOURCE_CHOICES = (
+        ('GPS', 'Device GPS'),
+        ('MAP', 'Map pin'),
+        ('SEARCH', 'Place search'),
+        ('MANUAL', 'Typed manually'),
+        ('LEGACY', 'Migrated from profile'),
+    )
+    UNIQUE_LABELS = ('HOME', 'WORK')
+    MAX_PER_USER = 15
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='addresses')
+    label = models.CharField(max_length=10, choices=LABEL_CHOICES, default='HOME')
+    custom_label = models.CharField(max_length=40, blank=True, help_text="Name for OTHER addresses, e.g. \"Mom's place\".")
+
+    house = models.CharField(max_length=120, help_text="Flat / house no. / floor / building")
+    area = models.CharField(max_length=200, blank=True, help_text="Street, locality, area (usually from the map)")
+    landmark = models.CharField(max_length=120, blank=True)
+    city = models.CharField(max_length=100)
+    district = models.CharField(max_length=100, blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    pincode = models.CharField(max_length=6, db_index=True)
+    country = models.CharField(max_length=2, default='IN')
+
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    location_accuracy_m = models.PositiveIntegerField(null=True, blank=True, help_text="GPS accuracy radius when captured")
+    location_source = models.CharField(max_length=10, choices=SOURCE_CHOICES, default='MAP')
+    geocoded_address = models.CharField(max_length=300, blank=True, help_text="Address the map resolved the pin to")
+
+    receiver_name = models.CharField(max_length=150, blank=True, help_text="If someone else is at this address")
+    receiver_phone = models.CharField(max_length=17, blank=True)
+
+    is_default = models.BooleanField(default=False)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Saved Address'
+        verbose_name_plural = 'Saved Addresses'
+        ordering = ['-is_default', '-last_used_at', '-updated_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user'], condition=models.Q(is_default=True), name='uniq_default_address_per_user',
+            ),
+            models.UniqueConstraint(
+                fields=['user', 'label'], condition=models.Q(label__in=['HOME', 'WORK']),
+                name='uniq_home_work_address_per_user',
+            ),
+        ]
+        indexes = [models.Index(fields=['user', 'is_default'])]
+
+    def __str__(self):
+        return f"{self.display_label} · {self.short_address} (User {self.user_id})"
+
+    @property
+    def display_label(self):
+        if self.label == 'OTHER':
+            return self.custom_label.strip() or 'Other'
+        return self.get_label_display()
+
+    @property
+    def short_address(self):
+        return ', '.join(p for p in [self.house, self.area] if p)
+
+    @property
+    def full_address(self):
+        parts = [self.house, self.area, self.landmark and f"Near {self.landmark}", self.city, self.state]
+        line = ', '.join(p.strip() for p in parts if p and p.strip())
+        return f"{line} - {self.pincode}" if self.pincode else line
+
+    @property
+    def has_location(self):
+        return self.latitude is not None and self.longitude is not None
+
+    @property
+    def maps_url(self):
+        if not self.has_location:
+            return ''
+        return f"https://www.google.com/maps/search/?api=1&query={self.latitude},{self.longitude}"
+
+
 class PhoneOTP(models.Model):
     PURPOSE_CHOICES = (
         ('REGISTRATION', 'Registration'),

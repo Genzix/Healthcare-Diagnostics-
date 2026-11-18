@@ -3,7 +3,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import PhoneOTP, FamilyMember, phone_validator
+from .models import PhoneOTP, FamilyMember, UserAddress, phone_validator
 from .services import normalize_phone_number
 
 User = get_user_model()
@@ -431,3 +431,112 @@ class ShareCreateSerializer(serializers.Serializer):
 
 
 
+
+
+class UserAddressSerializer(serializers.ModelSerializer):
+    """
+    Saved address. Coordinates (the confirmed map pin) are required for new
+    addresses; legacy addresses without a pin must get one when next edited.
+    """
+    display_label = serializers.CharField(read_only=True)
+    full_address = serializers.CharField(read_only=True)
+    short_address = serializers.CharField(read_only=True)
+    has_location = serializers.BooleanField(read_only=True)
+    maps_url = serializers.CharField(read_only=True)
+    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True, coerce_to_string=False)
+    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True, coerce_to_string=False)
+    is_default = serializers.BooleanField(required=False)
+
+    class Meta:
+        model = UserAddress
+        fields = [
+            'id', 'label', 'custom_label', 'display_label',
+            'house', 'area', 'landmark', 'city', 'district', 'state', 'pincode', 'country',
+            'latitude', 'longitude', 'location_accuracy_m', 'location_source', 'geocoded_address',
+            'receiver_name', 'receiver_phone',
+            'is_default', 'last_used_at', 'created_at', 'updated_at',
+            'full_address', 'short_address', 'has_location', 'maps_url',
+        ]
+        read_only_fields = ['id', 'country', 'last_used_at', 'created_at', 'updated_at']
+
+    def to_internal_value(self, data):
+        # Round incoming coordinates to 6 dp before DecimalField validation (GPS gives 15+).
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        for k in ('latitude', 'longitude'):
+            v = data.get(k)
+            if v not in (None, ''):
+                try:
+                    data[k] = round(float(v), 6)
+                except (TypeError, ValueError):
+                    pass
+        return super().to_internal_value(data)
+
+    def _clean_text(self, v, max_len):
+        return re.sub(r'\s+', ' ', (v or '')).strip()[:max_len]
+
+    def validate_house(self, v):
+        v = self._clean_text(v, 120)
+        if len(v) < 1:
+            raise serializers.ValidationError('Enter your flat / house number.')
+        return v
+
+    def validate_area(self, v):
+        return self._clean_text(v, 200)
+
+    def validate_landmark(self, v):
+        return self._clean_text(v, 120)
+
+    def validate_city(self, v):
+        v = self._clean_text(v, 100)
+        if len(v) < 2:
+            raise serializers.ValidationError('Enter your city.')
+        return v
+
+    def validate_custom_label(self, v):
+        return self._clean_text(v, 40)
+
+    def validate_pincode(self, v):
+        v = re.sub(r'\D', '', str(v or ''))
+        if not re.fullmatch(r'[1-9]\d{5}', v):
+            raise serializers.ValidationError('Enter a valid 6-digit pincode.')
+        return v
+
+    def validate_receiver_name(self, v):
+        return self._clean_text(v, 150)
+
+    def validate_receiver_phone(self, v):
+        v = normalize_phone_number(v or '')
+        if not v:
+            return ''
+        digits = re.sub(r'\D', '', v)[-10:]
+        if not re.fullmatch(r'[6-9]\d{9}', digits):
+            raise serializers.ValidationError('Enter a valid 10-digit mobile number.')
+        return '+91' + digits
+
+    def validate(self, attrs):
+        from .addresses import in_service_country
+        inst = self.instance
+        lat = attrs.get('latitude', getattr(inst, 'latitude', None))
+        lng = attrs.get('longitude', getattr(inst, 'longitude', None))
+
+        if (lat is None) != (lng is None):
+            raise serializers.ValidationError({'latitude': ['Both latitude and longitude are required.']})
+        if lat is None:
+            raise serializers.ValidationError(
+                {'latitude': ['Set the exact location on the map.']}, code='location_required',
+            )
+        if not (-90 <= float(lat) <= 90 and -180 <= float(lng) <= 180):
+            raise serializers.ValidationError({'latitude': ['Invalid map location.']})
+        if not in_service_country(float(lat), float(lng)):
+            raise serializers.ValidationError(
+                {'latitude': ['We only collect samples in India. Move the pin to your address.']}, code='out_of_area',
+            )
+
+        label = attrs.get('label', getattr(inst, 'label', 'HOME'))
+        custom = attrs.get('custom_label', getattr(inst, 'custom_label', ''))
+        if label == 'OTHER' and not custom:
+            raise serializers.ValidationError({'custom_label': ['Name this address, e.g. “Mom’s place”.']})
+        if attrs.get('receiver_phone') and not attrs.get('receiver_name', getattr(inst, 'receiver_name', '')):
+            raise serializers.ValidationError({'receiver_name': ['Who should the technician ask for?']})
+        return attrs

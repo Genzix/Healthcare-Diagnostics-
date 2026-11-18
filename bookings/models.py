@@ -92,6 +92,14 @@ class Booking(models.Model):
     collection_city = models.CharField(max_length=100, blank=True)
     collection_pincode = models.CharField(max_length=10, blank=True)
     collection_landmark = models.CharField(max_length=150, blank=True)
+    # Exact pin of the collection address (snapshot) + the saved address it came from.
+    collection_latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    collection_longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    collection_address_ref = models.ForeignKey(
+        'accounts.UserAddress', on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings',
+    )
+    collection_contact_name = models.CharField(max_length=150, blank=True)
+    collection_contact_phone = models.CharField(max_length=17, blank=True)
 
     # Diagnostic Centre Visit Snapshot (if CENTRE_VISIT)
     centre_name_snapshot = models.CharField(max_length=200, blank=True)
