@@ -1,6 +1,6 @@
 import hashlib
 import uuid
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN
 
 from django.conf import settings
 from django.db import transaction
@@ -321,11 +321,51 @@ def partner_update_service_status(
 # Pricing & booking creation
 # =====================================================================
 
-def calculate_booking_pricing(partner: DiagnosticPartner, test_ids: list, package_ids: list, service_mode: str, pincode: str = None):
+CENT = Decimal('0.01')
+ADVANCE_RATE = Decimal('0.30')
+
+
+def max_patients_per_order():
+    """How many people one household order may cover (one visit, one slot)."""
+    return max(1, int(getattr(settings, 'BOOKING_MAX_PATIENTS_PER_ORDER', 6)))
+
+
+def split_amount(amount, parts):
+    """
+    Split money into `parts` shares that sum to `amount` exactly. The first share
+    absorbs the paise remainder, so ₹150 / 4 → [37.50, 37.50, 37.50, 37.50] and
+    ₹100 / 3 → [33.34, 33.33, 33.33].
+    """
+    amount = Decimal(str(amount)).quantize(CENT)
+    if parts <= 1:
+        return [amount]
+    base = (amount / parts).quantize(CENT, rounding=ROUND_DOWN)
+    return [amount - base * (parts - 1)] + [base] * (parts - 1)
+
+
+def _advance_split(total):
+    """30% advance upfront, exactly the remainder as balance."""
+    advance = round(total * ADVANCE_RATE, 2)
+    return advance, total - advance
+
+
+def calculate_booking_pricing(partner: DiagnosticPartner, test_ids: list, package_ids: list, service_mode: str,
+                              pincode: str = None, patient_count: int = 1):
     """
     Calculates subtotal, home collection fee, total, 30% advance, and 70% balance.
     Takes into account partner-specific price overrides if configured.
+
+    `patient_count` > 1 prices a household order: every patient takes the same
+    tests, but the technician makes ONE visit, so the home collection fee is
+    charged once and shared across the patients' bookings (`per_patient`). The
+    group advance is the sum of each booking's own 30%, so what the estimate
+    shows is exactly what the per-booking ledgers will charge.
     """
+    patient_count = int(patient_count or 1)
+    limit = max_patients_per_order()
+    if patient_count < 1 or patient_count > limit:
+        return None, f"One booking can cover between 1 and {limit} patients."
+
     items_breakdown = []
     subtotal = Decimal('0.00')
 
@@ -368,34 +408,204 @@ def calculate_booking_pricing(partner: DiagnosticPartner, test_ids: list, packag
 
     # 3. Home Collection Fee & Serviceability Check
     home_collection_fee = Decimal('0.00')
-    is_serviceable = True
 
     if service_mode == 'HOME_COLLECTION':
         if not partner.offers_home_collection:
             return None, "This diagnostic centre does not offer home sample collection."
-        if pincode:
-            is_serviceable = partner.is_serviceable(pincode)
-            if not is_serviceable:
-                return None, f"Home collection is not available for pincode {pincode} by this partner."
+        if pincode and not partner.is_serviceable(pincode):
+            return None, f"Home collection is not available for pincode {pincode} by this partner."
         home_collection_fee = partner.home_collection_fee
 
-    # 4. Total and 30% / 70% Split Rule
-    total_amount = subtotal + home_collection_fee
-    if total_amount <= Decimal('0.00'):
+    # 4. Per-patient ledgers (one visit fee, shared) and the 30% / 70% split
+    if subtotal + home_collection_fee <= Decimal('0.00'):
         return None, "Please select at least one valid diagnostic test or health package."
 
-    # 30% Advance upfront, exactly 70% remaining balance
-    advance_amount = round(total_amount * Decimal('0.30'), 2)
-    balance_amount = total_amount - advance_amount
+    per_patient = []
+    for fee_share in split_amount(home_collection_fee, patient_count):
+        total = subtotal + fee_share
+        advance, balance = _advance_split(total)
+        per_patient.append({
+            'subtotal_amount': subtotal,
+            'home_collection_fee': fee_share,
+            'total_amount': total,
+            'advance_amount_due': advance,
+            'balance_amount_due': balance,
+        })
+
+    total_amount = sum((p['total_amount'] for p in per_patient), Decimal('0.00'))
+    advance_amount = sum((p['advance_amount_due'] for p in per_patient), Decimal('0.00'))
+    balance_amount = sum((p['balance_amount_due'] for p in per_patient), Decimal('0.00'))
 
     return {
-        'subtotal_amount': float(subtotal),
+        'patient_count': patient_count,
+        'per_patient_subtotal': float(subtotal),
+        'subtotal_amount': float(subtotal * patient_count),
         'home_collection_fee': float(home_collection_fee),
         'total_amount': float(total_amount),
         'advance_amount_due_30_percent': float(advance_amount),
         'balance_amount_due_70_percent': float(balance_amount),
         'items': items_breakdown,
+        'per_patient': [{k: float(v) for k, v in p.items()} for p in per_patient],
+        '_ledgers': per_patient,  # Decimal rows for booking creation; stripped from API responses
     }, None
+
+
+def public_pricing(pricing):
+    """Pricing dict safe to serialise (drops the internal Decimal ledgers)."""
+    return {k: v for k, v in pricing.items() if not k.startswith('_')}
+
+
+# ── Booking creation building blocks (shared by single and household orders) ──
+
+def _resolve_patient(user, patient_type, family_member_id=None):
+    """Frozen patient snapshot for a booking. Raises WorkflowError."""
+    if patient_type == 'FAMILY_MEMBER':
+        member = FamilyMember.objects.filter(pk=family_member_id, user=user).first() if family_member_id else None
+        if not member:
+            raise WorkflowError("Selected family member profile not found.", code='patient_not_found')
+        return {
+            'patient_type': 'FAMILY_MEMBER',
+            'family_member': member,
+            'patient_name': member.name,
+            'patient_age': member.get_age(),
+            'patient_gender': member.gender,
+            'patient_phone': member.contact_number or user.phone_number,
+        }
+    return {
+        'patient_type': 'SELF',
+        'family_member': None,
+        'patient_name': user.get_full_name() or "Patient",
+        'patient_age': user.get_age(),
+        'patient_gender': user.gender or "Unspecified",
+        'patient_phone': user.phone_number,
+    }
+
+
+def _resolve_location(user, partner, service_mode, data):
+    """Collection address (home) or centre snapshot (visit). Raises WorkflowError."""
+    loc = {
+        'collection_address': '', 'collection_city': '', 'collection_pincode': '', 'collection_landmark': '',
+        'collection_latitude': None, 'collection_longitude': None, 'collection_address_ref': None,
+        'collection_contact_name': '', 'collection_contact_phone': '',
+        'centre_name_snapshot': '', 'centre_address_snapshot': '',
+    }
+    if service_mode != 'HOME_COLLECTION':
+        loc['centre_name_snapshot'] = partner.centre_name
+        loc['centre_address_snapshot'] = f"{partner.address_line}, {partner.city}, {partner.state} - {partner.pincode}"
+        return loc
+
+    address_id = data.get('address_id')
+    if address_id:
+        from accounts.models import UserAddress
+        saved = UserAddress.objects.filter(pk=address_id, user=user).first()
+        if not saved:
+            raise WorkflowError("Selected address not found. Please choose another address.", code='address_not_found')
+        loc.update(
+            collection_address=', '.join(p for p in [saved.house, saved.area] if p),
+            collection_city=saved.city,
+            collection_pincode=saved.pincode,
+            collection_landmark=saved.landmark,
+            collection_latitude=saved.latitude,
+            collection_longitude=saved.longitude,
+            collection_address_ref=saved,
+            collection_contact_name=saved.receiver_name,
+            collection_contact_phone=saved.receiver_phone,
+        )
+    else:
+        loc.update(
+            collection_address=(data.get('collection_address') or '').strip(),
+            collection_city=(data.get('collection_city') or '').strip(),
+            collection_pincode=str(data.get('collection_pincode') or '').strip(),
+            collection_landmark=(data.get('collection_landmark') or '').strip(),
+        )
+
+    if not loc['collection_address'] or not loc['collection_pincode']:
+        raise WorkflowError("Collection address and pincode are required for home collection.", code='address_required')
+    if not partner.is_serviceable(loc['collection_pincode']):
+        raise WorkflowError(f"Partner centre does not service pincode {loc['collection_pincode']}.", code='not_serviceable')
+    return loc
+
+
+def _resolve_slot(partner, slot_id, seats=1):
+    """Row-lock the slot and check it can seat `seats` patients. Seats are claimed at payment time."""
+    slot = PartnerSlot.objects.select_for_update().filter(pk=slot_id, partner=partner, is_active=True).first() if slot_id else None
+    if not slot:
+        raise WorkflowError("Valid time slot not found for this partner.", code='slot_not_found')
+    free = slot.max_capacity - slot.booked_count
+    if free < 1:
+        raise WorkflowError("Selected time slot is already fully booked. Please select another slot.", code='slot_full', http_status=409)
+    if free < seats:
+        raise WorkflowError(
+            f"Only {free} seat{'s' if free != 1 else ''} left in this slot — not enough for {seats} patients. Please pick another slot.",
+            code='slot_full', http_status=409,
+        )
+    return slot
+
+
+def _resolve_partner(data):
+    partner = DiagnosticPartner.objects.filter(pk=data.get('partner_id'), status='ACTIVE').first()
+    if not partner:
+        raise WorkflowError("Active diagnostic partner centre not found.", code='partner_not_found')
+    service_mode = data.get('service_mode')
+    if service_mode not in ('HOME_COLLECTION', 'CENTRE_VISIT'):
+        raise WorkflowError("Invalid service mode. Choose 'HOME_COLLECTION' or 'CENTRE_VISIT'.", code='invalid_service_mode')
+    return partner, service_mode
+
+
+def _item_templates(pricing_items):
+    """Resolve catalogue rows once per order (not once per patient per item)."""
+    test_ids = [i['id'] for i in pricing_items if i['item_type'] == 'TEST']
+    pkg_ids = [i['id'] for i in pricing_items if i['item_type'] == 'PACKAGE']
+    tests = DiagnosticTest.objects.in_bulk(test_ids)
+    pkgs = HealthPackage.objects.in_bulk(pkg_ids)
+    return [
+        {
+            'item_type': i['item_type'],
+            'test': tests.get(i['id']) if i['item_type'] == 'TEST' else None,
+            'package': pkgs.get(i['id']) if i['item_type'] == 'PACKAGE' else None,
+            'item_name': i['name'],
+            'price': Decimal(str(i['price'])),
+        }
+        for i in pricing_items
+    ]
+
+
+def _create_booking_row(user, partner, service_mode, patient, location, slot, ledger, item_templates, group_ref=''):
+    booking = Booking.objects.create(
+        user=user,
+        partner=partner,
+        group_ref=group_ref,
+        service_mode=service_mode,
+        **patient,
+        **location,
+        booking_date=slot.date,
+        slot=slot,
+        slot_start_time=slot.start_time,
+        slot_end_time=slot.end_time,
+        subtotal_amount=ledger['subtotal_amount'],
+        home_collection_fee=ledger['home_collection_fee'],
+        total_amount=ledger['total_amount'],
+        advance_amount_due=ledger['advance_amount_due'],
+        balance_amount_due=ledger['balance_amount_due'],
+        booking_status=wf.AWAITING_ADVANCE_PAYMENT,
+        payment_status='PENDING',
+    )
+    BookingItem.objects.bulk_create([BookingItem(booking=booking, **tpl) for tpl in item_templates])
+    return booking
+
+
+def _price_or_raise(partner, data, service_mode, pincode, patient_count):
+    pricing, error = calculate_booking_pricing(
+        partner=partner,
+        test_ids=data.get('test_ids', []),
+        package_ids=data.get('package_ids', []),
+        service_mode=service_mode,
+        pincode=pincode,
+        patient_count=patient_count,
+    )
+    if error:
+        raise WorkflowError(error, code='pricing_error')
+    return pricing
 
 
 @transaction.atomic
@@ -403,159 +613,87 @@ def create_booking_order(user, data: dict):
     """
     Creates a new booking request in AWAITING_ADVANCE_PAYMENT status.
     """
-    partner_id = data.get('partner_id')
     try:
-        partner = DiagnosticPartner.objects.get(pk=partner_id, status='ACTIVE')
-    except DiagnosticPartner.DoesNotExist:
-        return None, "Active diagnostic partner centre not found."
+        partner, service_mode = _resolve_partner(data)
+        patient = _resolve_patient(user, data.get('patient_type', 'SELF'), data.get('family_member_id'))
+        location = _resolve_location(user, partner, service_mode, data)
+        slot = _resolve_slot(partner, data.get('slot_id'))
+        pricing = _price_or_raise(partner, data, service_mode, location['collection_pincode'], 1)
+    except WorkflowError as exc:
+        return None, exc.message
 
-    service_mode = data.get('service_mode')
-    if service_mode not in ['HOME_COLLECTION', 'CENTRE_VISIT']:
-        return None, "Invalid service mode. Choose 'HOME_COLLECTION' or 'CENTRE_VISIT'."
-
-    # Patient Details Snapshot
-    patient_type = data.get('patient_type', 'SELF')
-    family_member = None
-
-    if patient_type == 'FAMILY_MEMBER':
-        family_member_id = data.get('family_member_id')
-        try:
-            family_member = FamilyMember.objects.get(pk=family_member_id, user=user)
-            patient_name = family_member.name
-            patient_age = family_member.get_age()
-            patient_gender = family_member.gender
-            patient_phone = family_member.contact_number or user.phone_number
-        except FamilyMember.DoesNotExist:
-            return None, "Selected family member profile not found."
-    else:
-        patient_name = user.get_full_name() or "Patient"
-        patient_age = user.get_age()
-        patient_gender = user.gender or "Unspecified"
-        patient_phone = user.phone_number
-
-    # Home Collection or Centre Visit address
-    collection_address = ""
-    collection_city = ""
-    collection_pincode = ""
-    collection_landmark = ""
-    centre_name_snapshot = ""
-    centre_address_snapshot = ""
-
-    saved_address = None
-    collection_latitude = collection_longitude = None
-    collection_contact_name = collection_contact_phone = ""
-
-    if service_mode == 'HOME_COLLECTION':
-        address_id = data.get('address_id')
-        if address_id:
-            from accounts.models import UserAddress
-            saved_address = UserAddress.objects.filter(pk=address_id, user=user).first()
-            if not saved_address:
-                return None, "Selected address not found. Please choose another address."
-            collection_address = ', '.join(p for p in [saved_address.house, saved_address.area] if p)
-            collection_city = saved_address.city
-            collection_pincode = saved_address.pincode
-            collection_landmark = saved_address.landmark
-            collection_latitude = saved_address.latitude
-            collection_longitude = saved_address.longitude
-            collection_contact_name = saved_address.receiver_name
-            collection_contact_phone = saved_address.receiver_phone
-        else:
-            collection_address = (data.get('collection_address') or '').strip()
-            collection_city = (data.get('collection_city') or '').strip()
-            collection_pincode = str(data.get('collection_pincode') or '').strip()
-            collection_landmark = (data.get('collection_landmark') or '').strip()
-
-        if not collection_address or not collection_pincode:
-            return None, "Collection address and pincode are required for home collection."
-
-        if not partner.is_serviceable(collection_pincode):
-            return None, f"Partner centre does not service pincode {collection_pincode}."
-    else:
-        centre_name_snapshot = partner.centre_name
-        centre_address_snapshot = f"{partner.address_line}, {partner.city}, {partner.state} - {partner.pincode}"
-
-    # Slot validation
-    slot_id = data.get('slot_id')
-    try:
-        slot = PartnerSlot.objects.select_for_update().get(pk=slot_id, partner=partner, is_active=True)
-        if not slot.is_available:
-            return None, "Selected time slot is already fully booked. Please select another slot."
-    except PartnerSlot.DoesNotExist:
-        return None, "Valid time slot not found for this partner."
-
-    # Pricing calculation
-    test_ids = data.get('test_ids', [])
-    package_ids = data.get('package_ids', [])
-    pricing_data, error = calculate_booking_pricing(
-        partner=partner,
-        test_ids=test_ids,
-        package_ids=package_ids,
-        service_mode=service_mode,
-        pincode=collection_pincode
+    booking = _create_booking_row(
+        user, partner, service_mode, patient, location, slot,
+        pricing['_ledgers'][0], _item_templates(pricing['items']),
     )
-    if error:
-        return None, error
-
-    total_amount = Decimal(str(pricing_data['total_amount']))
-    advance_amount_due = Decimal(str(pricing_data['advance_amount_due_30_percent']))
-    balance_amount_due = Decimal(str(pricing_data['balance_amount_due_70_percent']))
-    subtotal = Decimal(str(pricing_data['subtotal_amount']))
-    home_collection_fee = Decimal(str(pricing_data['home_collection_fee']))
-
-    # Create Booking
-    booking = Booking.objects.create(
-        user=user,
-        partner=partner,
-        patient_type=patient_type,
-        family_member=family_member,
-        patient_name=patient_name,
-        patient_age=patient_age,
-        patient_gender=patient_gender,
-        patient_phone=patient_phone,
-        service_mode=service_mode,
-        collection_address=collection_address,
-        collection_city=collection_city,
-        collection_pincode=collection_pincode,
-        collection_landmark=collection_landmark,
-        collection_latitude=collection_latitude,
-        collection_longitude=collection_longitude,
-        collection_address_ref=saved_address,
-        collection_contact_name=collection_contact_name,
-        collection_contact_phone=collection_contact_phone,
-        centre_name_snapshot=centre_name_snapshot,
-        centre_address_snapshot=centre_address_snapshot,
-        booking_date=slot.date,
-        slot=slot,
-        slot_start_time=slot.start_time,
-        slot_end_time=slot.end_time,
-        subtotal_amount=subtotal,
-        home_collection_fee=home_collection_fee,
-        total_amount=total_amount,
-        advance_amount_due=advance_amount_due,
-        balance_amount_due=balance_amount_due,
-        booking_status='AWAITING_ADVANCE_PAYMENT',
-        payment_status='PENDING',
-    )
-
-    if saved_address:
+    if location['collection_address_ref']:
         from accounts.addresses import touch_address
-        touch_address(saved_address)
+        touch_address(location['collection_address_ref'])
+    return booking, None
 
-    # Create Booking Items
-    for item in pricing_data['items']:
-        test_obj = DiagnosticTest.objects.filter(id=item['id']).first() if item['item_type'] == 'TEST' else None
-        pkg_obj = HealthPackage.objects.filter(id=item['id']).first() if item['item_type'] == 'PACKAGE' else None
-        BookingItem.objects.create(
-            booking=booking,
-            item_type=item['item_type'],
-            test=test_obj,
-            package=pkg_obj,
-            item_name=item['name'],
-            price=Decimal(str(item['price']))
+
+def _patient_key(entry):
+    ptype = (entry.get('patient_type') or 'SELF').upper()
+    return ('FAMILY_MEMBER', int(entry.get('family_member_id') or 0)) if ptype == 'FAMILY_MEMBER' else ('SELF', 0)
+
+
+def _new_group_ref():
+    from .models import generate_group_ref
+    for _ in range(5):
+        ref = generate_group_ref()
+        if not Booking.objects.filter(group_ref=ref).exists():
+            return ref
+    raise WorkflowError("Could not allocate an order reference. Please try again.", code='group_ref_collision', http_status=503)
+
+
+@transaction.atomic
+def create_group_booking_order(user, data: dict):
+    """
+    One household order: several patients, same tests, one address, one slot, one
+    visit. Each patient gets their own booking (own sample label, report, lab
+    pipeline and refund), linked by `group_ref`. All-or-nothing: if any patient
+    fails validation, no booking is created.
+
+    Returns (bookings, group_ref). Raises WorkflowError.
+    """
+    entries = data.get('patients') or []
+    limit = max_patients_per_order()
+    if not entries:
+        raise WorkflowError("Select at least one patient.", code='patients_required')
+    if len(entries) > limit:
+        raise WorkflowError(f"One booking can cover at most {limit} patients.", code='too_many_patients')
+    keys = [_patient_key(e) for e in entries]
+    if len(set(keys)) != len(keys):
+        raise WorkflowError("Each patient can be added only once.", code='duplicate_patient')
+
+    partner, service_mode = _resolve_partner(data)
+    patients = [_resolve_patient(user, e.get('patient_type', 'SELF'), e.get('family_member_id')) for e in entries]
+    location = _resolve_location(user, partner, service_mode, data)
+    slot = _resolve_slot(partner, data.get('slot_id'), seats=len(patients))
+
+    # Same person cannot hold two live seats in the same slot (an unpaid draft holds no seat).
+    clashes = Booking.objects.filter(
+        user=user, slot=slot, booking_status__in=wf.ACTIVE - {wf.AWAITING_ADVANCE_PAYMENT},
+    ).values_list('patient_type', 'family_member_id', 'patient_name')
+    taken = {('FAMILY_MEMBER', fm) if pt == 'FAMILY_MEMBER' else ('SELF', 0): name for pt, fm, name in clashes}
+    already = [taken[k] for k in keys if k in taken]
+    if already:
+        raise WorkflowError(
+            f"{', '.join(already)} already {'has' if len(already) == 1 else 'have'} a booking in this slot.",
+            code='patient_already_booked', http_status=409,
         )
 
-    return booking, None
+    pricing = _price_or_raise(partner, data, service_mode, location['collection_pincode'], len(patients))
+    templates = _item_templates(pricing['items'])
+    group_ref = _new_group_ref()
+    bookings = [
+        _create_booking_row(user, partner, service_mode, patient, location, slot, ledger, templates, group_ref=group_ref)
+        for patient, ledger in zip(patients, pricing['_ledgers'])
+    ]
+    if location['collection_address_ref']:
+        from accounts.addresses import touch_address
+        touch_address(location['collection_address_ref'])
+    return bookings, group_ref
 
 
 
@@ -575,23 +713,22 @@ def _release_slot(booking):
             slot.save(update_fields=['booked_count'])
 
 
-@transaction.atomic
-def process_advance_payment(booking: Booking, payment_mode='ONLINE', gateway_transaction_id=None):
+def _claim_seats(slot_id, seats, full_message):
     """
-    30% advance → AWAITING_PARTNER_CONFIRMATION. The slot seat is claimed here
-    under a row lock, so two patients cannot pay into the last seat.
+    Take `seats` places in the slot under a row lock — all or nothing, so a
+    household order never ends up half-seated. Raises WorkflowError (409).
     """
-    locked = _lock(booking)
-    if locked.booking_status != wf.AWAITING_ADVANCE_PAYMENT:
-        return None, f"Booking cannot accept advance payment in current status: {locked.booking_status}."
+    if not slot_id or seats <= 0:
+        return
+    slot = PartnerSlot.objects.select_for_update().get(pk=slot_id)
+    if not slot.is_active or slot.max_capacity - slot.booked_count < seats:
+        raise WorkflowError(full_message, code='slot_full', http_status=409)
+    slot.booked_count += seats
+    slot.save(update_fields=['booked_count'])
 
-    if locked.slot_id:
-        slot = PartnerSlot.objects.select_for_update().get(pk=locked.slot_id)
-        if not slot.is_available:
-            return None, "This time slot filled up before your payment completed. Please choose another slot."
-        slot.booked_count += 1
-        slot.save(update_fields=['booked_count'])
 
+def _apply_advance(locked, payment_mode, gateway_transaction_id, metadata=None):
+    """Record the 30% advance on an already-locked, seated booking (no notifications)."""
     advance_due = locked.advance_amount_due
     payment = Payment.objects.create(
         payment_id=_ref('PAY'),
@@ -602,14 +739,45 @@ def process_advance_payment(booking: Booking, payment_mode='ONLINE', gateway_tra
         status='SUCCESS',
         gateway_transaction_id=gateway_transaction_id or f"TXN-{uuid.uuid4().hex[:8].upper()}",
     )
-
     locked.advance_amount_paid = advance_due
     locked.booking_status = wf.AWAITING_PARTNER_CONFIRMATION
     locked.payment_status = 'ADVANCE_PAID'
     locked.status_changed_at = timezone.now()
     locked.save(update_fields=['advance_amount_paid', 'booking_status', 'payment_status', 'status_changed_at', 'updated_at'])
     log_status(locked, wf.AWAITING_ADVANCE_PAYMENT, wf.AWAITING_PARTNER_CONFIRMATION, actor=locked.user,
-               actor_role=wf.PATIENT, notes='Advance payment received.', metadata={'payment_id': payment.payment_id})
+               actor_role=wf.PATIENT, notes='Advance payment received.',
+               metadata={'payment_id': payment.payment_id, **(metadata or {})})
+    return payment
+
+
+def _apply_pay_later(locked, user, metadata=None):
+    """Switch an already-locked, seated booking to pay-at-collection (no notifications)."""
+    locked.payment_plan = PAY_LATER
+    locked.booking_status = wf.AWAITING_PARTNER_CONFIRMATION
+    locked.status_changed_at = timezone.now()
+    locked.save(update_fields=['payment_plan', 'booking_status', 'status_changed_at', 'updated_at'])
+    log_status(locked, wf.AWAITING_ADVANCE_PAYMENT, wf.AWAITING_PARTNER_CONFIRMATION, actor=user,
+               actor_role=wf.PATIENT, notes='Pay at collection selected.',
+               metadata={'payment_plan': PAY_LATER, **(metadata or {})})
+
+
+@transaction.atomic
+def process_advance_payment(booking: Booking, payment_mode='ONLINE', gateway_transaction_id=None):
+    """
+    30% advance → AWAITING_PARTNER_CONFIRMATION. The slot seat is claimed here
+    under a row lock, so two patients cannot pay into the last seat.
+    """
+    locked = _lock(booking)
+    if locked.booking_status != wf.AWAITING_ADVANCE_PAYMENT:
+        return None, f"Booking cannot accept advance payment in current status: {locked.booking_status}."
+
+    try:
+        _claim_seats(locked.slot_id, 1, "This time slot filled up before your payment completed. Please choose another slot.")
+    except WorkflowError as exc:
+        return None, exc.message
+
+    payment = _apply_advance(locked, payment_mode, gateway_transaction_id)
+    advance_due = payment.amount
     _sync(booking, locked)
 
     notify(locked.user, 'PAYMENT_RESULT', 'Advance Payment (30%) Received',
@@ -711,10 +879,12 @@ def pay_at_collection_eligibility(partner, total_amount, user=None):
         return False, f"Pay at collection is available for bookings up to ₹{cap:,.0f}. Please pay the advance online."
     if user is not None and getattr(user, 'is_authenticated', False):
         max_open = int(getattr(settings, 'PAY_AT_COLLECTION_MAX_OPEN', 2))
-        open_unpaid = Booking.objects.filter(
+        # Count orders, not patients: a family of four on one visit is one open order.
+        rows = Booking.objects.filter(
             user=user, payment_plan=PAY_LATER, payment_status='PENDING',
             booking_status__in=wf.ACTIVE,
-        ).count()
+        ).values_list('group_ref', 'pk')
+        open_unpaid = len({ref or f'#{pk}' for ref, pk in rows})
         if open_unpaid >= max_open:
             return False, f"You already have {open_unpaid} unpaid pay-at-collection bookings. Please pay online for this one."
     return True, ''
@@ -734,20 +904,12 @@ def choose_pay_at_collection(booking: Booking, user):
     if not ok:
         return None, reason
 
-    if locked.slot_id:
-        slot = PartnerSlot.objects.select_for_update().get(pk=locked.slot_id)
-        if not slot.is_available:
-            return None, "This time slot just filled up. Please choose another slot."
-        slot.booked_count += 1
-        slot.save(update_fields=['booked_count'])
+    try:
+        _claim_seats(locked.slot_id, 1, "This time slot just filled up. Please choose another slot.")
+    except WorkflowError as exc:
+        return None, exc.message
 
-    now = timezone.now()
-    locked.payment_plan = PAY_LATER
-    locked.booking_status = wf.AWAITING_PARTNER_CONFIRMATION
-    locked.status_changed_at = now
-    locked.save(update_fields=['payment_plan', 'booking_status', 'status_changed_at', 'updated_at'])
-    log_status(locked, wf.AWAITING_ADVANCE_PAYMENT, wf.AWAITING_PARTNER_CONFIRMATION, actor=user,
-               actor_role=wf.PATIENT, notes='Pay at collection selected.', metadata={'payment_plan': PAY_LATER})
+    _apply_pay_later(locked, user)
     _sync(booking, locked)
 
     where = 'to the sample collector' if locked.service_mode == 'HOME_COLLECTION' else 'at the centre'
@@ -762,8 +924,11 @@ def choose_pay_at_collection(booking: Booking, user):
 
 
 @transaction.atomic
-def cancel_booking(booking: Booking, user, reason: str, actor_role=wf.PATIENT):
-    """Patient cancellation — allowed only before the sample is collected."""
+def cancel_booking(booking: Booking, user, reason: str, actor_role=wf.PATIENT, notify_user=True):
+    """Patient cancellation — allowed only before the sample is collected.
+
+    `notify_user=False` lets an order-level cancel send one summary instead of one message per patient.
+    """
     locked = _lock(booking)
     previous = locked.booking_status
     if previous not in wf.CANCELLABLE:
@@ -786,6 +951,8 @@ def cancel_booking(booking: Booking, user, reason: str, actor_role=wf.PATIENT):
     log_status(locked, previous, wf.CANCELLED, actor=user, actor_role=actor_role, notes=reason)
     _sync(booking, locked)
 
+    if not notify_user:
+        return booking, None
     notify(locked.user, 'BOOKING_CANCELLED', 'Booking Cancelled',
            f"Booking {locked.booking_id} has been cancelled."
            + (f" A refund of ₹{locked.amount_paid} will be credited within 3-5 working days." if refunded else ""),
@@ -794,6 +961,124 @@ def cancel_booking(booking: Booking, user, reason: str, actor_role=wf.PATIENT):
         notify(locked.partner.user, 'BOOKING_CANCELLED', 'Booking Cancelled by Patient',
                f"Booking {locked.booking_id} ({locked.patient_name}) was cancelled. Reason: {reason}", booking=locked)
     return booking, None
+
+
+# ── Household (multi-patient) orders ────────────────────────────────
+
+def _lock_group(user, group_ref):
+    """Lock every booking of the user's order, in pk order (a stable lock order avoids deadlocks)."""
+    rows = list(
+        Booking.objects.select_for_update().select_related('partner', 'user')
+        .filter(user=user, group_ref=group_ref).exclude(group_ref='').order_by('pk')
+    )
+    if not rows:
+        raise WorkflowError("Booking not found.", code='not_found', http_status=404)
+    return rows
+
+
+def _awaiting_payment(rows):
+    pending = [b for b in rows if b.booking_status == wf.AWAITING_ADVANCE_PAYMENT]
+    if not pending:
+        raise WorkflowError("This order has already been submitted — nothing is left to pay now.", code='nothing_due', http_status=409)
+    return pending
+
+
+def _claim_group_seats(pending):
+    """All patients' seats in one go (an order never ends up half-seated)."""
+    from collections import Counter
+    for slot_id, seats in sorted(Counter(b.slot_id for b in pending if b.slot_id).items()):
+        _claim_seats(
+            slot_id, seats,
+            f"This time slot no longer has {seats} free seat{'s' if seats != 1 else ''}. Please choose another slot.",
+        )
+
+
+def join_names(names):
+    names = [n for n in names if n]
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}" if names else ''
+
+
+def _when(b):
+    return f"{b.booking_date:%d %b} at {b.slot_start_time:%H:%M}"
+
+
+@transaction.atomic
+def pay_group_advance(user, group_ref, payment_mode='ONLINE', gateway_transaction_id=None):
+    """
+    One checkout for the whole household: every pending booking gets its own 30%
+    advance ledger entry, all under ONE gateway transaction, and all seats are
+    claimed atomically. Returns (bookings_paid, payments). Raises WorkflowError.
+    """
+    rows = _lock_group(user, group_ref)
+    pending = _awaiting_payment(rows)
+    _claim_group_seats(pending)
+
+    txn = gateway_transaction_id or f"TXN-{uuid.uuid4().hex[:8].upper()}"
+    payments = [_apply_advance(b, payment_mode, txn, {'group_ref': group_ref}) for b in pending]
+    total = sum((p.amount for p in payments), Decimal('0.00'))
+    lead, names = pending[0], join_names([b.patient_name for b in pending])
+
+    notify(user, 'PAYMENT_RESULT', 'Advance Payment (30%) Received',
+           f"30% advance of ₹{total} received for {len(pending)} patients ({names}) — order {group_ref}. "
+           "Your booking request is now awaiting partner confirmation.", booking=lead)
+    if lead.partner.user_id:
+        notify(lead.partner.user, 'BOOKING_REMINDER', f'New household booking · {len(pending)} patients',
+               f"Order {group_ref}: {names} at one address, {_when(lead)}. "
+               f"Bookings {', '.join(b.booking_id for b in pending)} await your confirmation.",
+               booking=lead, push=True)
+    return pending, payments
+
+
+@transaction.atomic
+def choose_group_pay_at_collection(user, group_ref):
+    """Submit the whole household order and pay everything at collection. Raises WorkflowError."""
+    rows = _lock_group(user, group_ref)
+    pending = _awaiting_payment(rows)
+    lead = pending[0]
+    total = sum((b.total_amount for b in pending), Decimal('0.00'))
+    ok, reason = pay_at_collection_eligibility(lead.partner, total, user)
+    if not ok:
+        raise WorkflowError(reason, code='pay_at_collection_unavailable')
+    _claim_group_seats(pending)
+    for b in pending:
+        _apply_pay_later(b, user, {'group_ref': group_ref})
+
+    where = 'to the sample collector' if lead.service_mode == 'HOME_COLLECTION' else 'at the centre'
+    names = join_names([b.patient_name for b in pending])
+    notify(user, 'PAYMENT_RESULT', 'Booking request sent',
+           f"Order {group_ref} for {names} is awaiting partner confirmation. Pay ₹{total} {where} "
+           "(cash or UPI), or pay online any time after the lab confirms.", booking=lead)
+    if lead.partner.user_id:
+        notify(lead.partner.user, 'BOOKING_REMINDER', 'New household booking · pay at collection',
+               f"Order {group_ref}: {names} at one address, {_when(lead)}. Collect ₹{total} {where}.",
+               booking=lead, push=True)
+    return pending
+
+
+@transaction.atomic
+def cancel_group(user, group_ref, reason):
+    """Cancel every still-cancellable booking of the order, with one summary notification each side."""
+    rows = _lock_group(user, group_ref)
+    targets = [b for b in rows if b.booking_status in wf.CANCELLABLE]
+    if not targets:
+        raise WorkflowError("Nothing in this order can be cancelled any more.", code='not_cancellable')
+    was_submitted = [b for b in targets if b.booking_status != wf.AWAITING_ADVANCE_PAYMENT]
+    for b in targets:
+        _, error = cancel_booking(b, user, reason, notify_user=False)
+        if error:
+            raise WorkflowError(error, code='not_cancellable')
+    refunded = sum((b.amount_paid for b in targets if b.payment_status == 'REFUNDED'), Decimal('0.00'))
+
+    lead = targets[0]
+    notify(user, 'BOOKING_CANCELLED', 'Booking Cancelled',
+           f"Order {group_ref} ({join_names([b.patient_name for b in targets])}) has been cancelled."
+           + (f" A refund of ₹{refunded} will be credited within 3-5 working days." if refunded else ""),
+           booking=lead)
+    if was_submitted and lead.partner.user_id:
+        notify(lead.partner.user, 'BOOKING_CANCELLED', 'Household booking cancelled by patient',
+               f"Order {group_ref}: {', '.join(b.booking_id for b in was_submitted)} cancelled. Reason: {reason}",
+               booking=lead)
+    return targets
 
 
 def generate_1mindoc_pdf_report(booking: Booking) -> bytes:

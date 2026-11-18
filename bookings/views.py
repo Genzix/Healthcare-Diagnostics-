@@ -27,6 +27,8 @@ from .serializers import (
     PartnerOfflineBalancePaymentSerializer,
     BookingCancelSerializer,
     NotificationSerializer,
+    GroupBookingCreateSerializer,
+    group_summary,
 )
 from .services import (
     WorkflowError,
@@ -44,6 +46,11 @@ from .services import (
     pay_at_collection_eligibility,
     process_balance_payment,
     send_system_notification,
+    public_pricing,
+    create_group_booking_order,
+    pay_group_advance,
+    choose_group_pay_at_collection,
+    cancel_group,
 )
 from partners.models import DiagnosticPartner
 
@@ -121,10 +128,12 @@ class PriceEstimateView(APIView):
             test_ids=serializer.validated_data.get('test_ids', []),
             package_ids=serializer.validated_data.get('package_ids', []),
             service_mode=serializer.validated_data['service_mode'],
-            pincode=serializer.validated_data.get('pincode')
+            pincode=serializer.validated_data.get('pincode'),
+            patient_count=serializer.validated_data.get('patient_count', 1),
         )
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
+        pricing = public_pricing(pricing)
 
         ok, reason = pay_at_collection_eligibility(partner, pricing['total_amount'], request.user)
         pricing['pay_at_collection'] = {'available': ok, 'reason': reason}
@@ -275,6 +284,111 @@ class BookingCancelView(APIView):
         if error:
             return Response({"success": False, "message": error}, status=status.HTTP_400_BAD_REQUEST)
         return Response(booking_payload(booking, wf.PATIENT, message="Booking cancelled successfully."))
+
+
+# =====================================================================
+# Household orders: several patients, one address, one slot, one visit
+# =====================================================================
+
+def group_payload(user, group_ref, **extra):
+    rows = list(booking_queryset().filter(user=user, group_ref=group_ref).exclude(group_ref='').order_by('pk'))
+    if not rows:
+        return None
+    ctx = {'audience': wf.PATIENT, 'user': user}
+    return {
+        "success": True,
+        "group": group_summary(rows, user),
+        "bookings": BookingDetailSerializer(rows, many=True, context=ctx).data,
+        **extra,
+    }
+
+
+def _not_found():
+    return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+
+class GroupBookingCreateView(APIView):
+    """
+    POST /api/bookings/group/
+    Same body as POST /api/bookings/ plus `patients: [{patient_type, family_member_id}]`.
+    Creates one booking per patient (all-or-nothing) linked by `group_ref`.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        serializer = GroupBookingCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            bookings, group_ref = create_group_booking_order(request.user, serializer.validated_data)
+        except WorkflowError as exc:
+            return workflow_error_response(exc)
+        return Response(
+            group_payload(request.user, group_ref, message=f"Booking created for {len(bookings)} patients. "
+                                                          "Pay the 30% advance online, or choose pay at collection."),
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class GroupBookingDetailView(APIView):
+    """GET /api/bookings/group/<group_ref>/ — order summary plus every patient's booking."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, group_ref, *args, **kwargs):
+        payload = group_payload(request.user, group_ref)
+        return Response(payload) if payload else _not_found()
+
+
+class GroupPayAdvanceView(APIView):
+    """POST /api/bookings/group/<group_ref>/pay-advance/ — one transaction, every patient's 30%."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_ref, *args, **kwargs):
+        serializer = AdvancePaymentRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            _, payments = pay_group_advance(
+                request.user, group_ref,
+                payment_mode=serializer.validated_data.get('payment_mode', 'ONLINE'),
+                gateway_transaction_id=serializer.validated_data.get('gateway_transaction_id') or request.data.get('transaction_id'),
+            )
+        except WorkflowError as exc:
+            return workflow_error_response(exc)
+        return Response(group_payload(
+            request.user, group_ref,
+            message="Advance payment successful. Booking sent to the partner centre for confirmation.",
+            payments=PaymentSerializer(payments, many=True).data,
+        ))
+
+
+class GroupPayAtCollectionView(APIView):
+    """POST /api/bookings/group/<group_ref>/pay-at-collection/ — submit the order, pay everything at collection."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_ref, *args, **kwargs):
+        try:
+            choose_group_pay_at_collection(request.user, group_ref)
+        except WorkflowError as exc:
+            return workflow_error_response(exc)
+        return Response(group_payload(request.user, group_ref,
+                                      message="Booking request sent. Pay at collection or online after the lab confirms."))
+
+
+class GroupCancelView(APIView):
+    """POST /api/bookings/group/<group_ref>/cancel/ — cancel every patient still before sample collection."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, group_ref, *args, **kwargs):
+        reason = request.data.get('cancellation_reason') or request.data.get('reason') or ''
+        serializer = BookingCancelSerializer(data={'cancellation_reason': reason})
+        if not serializer.is_valid():
+            return Response({"success": False, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            cancel_group(request.user, group_ref, serializer.validated_data['cancellation_reason'])
+        except WorkflowError as exc:
+            return workflow_error_response(exc)
+        return Response(group_payload(request.user, group_ref, message="Booking cancelled successfully."))
 
 
 class NotificationListView(APIView):

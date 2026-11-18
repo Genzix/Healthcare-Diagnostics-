@@ -21,6 +21,11 @@ from .views import (
     BookingWorkflowView,
     PayAtCollectionView,
     PartnerBookingDetailView,
+    GroupBookingCreateView,
+    GroupBookingDetailView,
+    GroupPayAdvanceView,
+    GroupPayAtCollectionView,
+    GroupCancelView,
 )
 
 app_name = 'bookings'
@@ -30,6 +35,12 @@ urlpatterns = [
     path('api/bookings/price-estimate/', PriceEstimateView.as_view(), name='api_booking_price_estimate'),
     path('api/bookings/workflow/', BookingWorkflowView.as_view(), name='api_booking_workflow'),
     path('api/bookings/', BookingListCreateView.as_view(), name='api_bookings_list_create'),
+    # Household orders (several patients, one address, one slot) — before the <str:pk> routes.
+    path('api/bookings/group/', GroupBookingCreateView.as_view(), name='api_booking_group_create'),
+    path('api/bookings/group/<str:group_ref>/', GroupBookingDetailView.as_view(), name='api_booking_group_detail'),
+    path('api/bookings/group/<str:group_ref>/pay-advance/', GroupPayAdvanceView.as_view(), name='api_booking_group_pay_advance'),
+    path('api/bookings/group/<str:group_ref>/pay-at-collection/', GroupPayAtCollectionView.as_view(), name='api_booking_group_pay_at_collection'),
+    path('api/bookings/group/<str:group_ref>/cancel/', GroupCancelView.as_view(), name='api_booking_group_cancel'),
     path('api/bookings/<int:pk>/', BookingDetailView.as_view(), name='api_booking_detail_int'),
     path('api/bookings/<str:pk>/', BookingDetailView.as_view(), name='api_booking_detail_str'),
     path('api/bookings/<int:pk>/pay-advance/', PayAdvanceView.as_view(), name='api_booking_pay_advance_int'),

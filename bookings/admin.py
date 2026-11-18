@@ -40,6 +40,7 @@ class BookingStatusLogInline(admin.TabularInline):
 class BookingAdmin(admin.ModelAdmin):
     list_display = (
         'booking_id',
+        'group_ref',
         'patient_name',
         'partner',
         'service_mode',
@@ -60,6 +61,7 @@ class BookingAdmin(admin.ModelAdmin):
     )
     search_fields = (
         'booking_id',
+        'group_ref',
         'patient_name',
         'patient_phone',
         'user__phone_number',

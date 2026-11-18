@@ -11,6 +11,10 @@ def generate_booking_id():
     return f"BK-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
 
+def generate_group_ref():
+    return f"GRP-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+
 def generate_receipt_number():
     return f"RCP-{timezone.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
@@ -58,6 +62,10 @@ class Booking(models.Model):
         on_delete=models.CASCADE,
         related_name='bookings'
     )
+    # Multi-patient order: one checkout, one address, one slot, one visit — but every
+    # patient keeps their own booking (own sample label, report and lab workflow).
+    # Blank for an ordinary single-patient booking.
+    group_ref = models.CharField(max_length=30, blank=True, default='', db_index=True)
     partner = models.ForeignKey(
         'partners.DiagnosticPartner',
         on_delete=models.PROTECT,

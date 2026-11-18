@@ -893,3 +893,200 @@ class PayAtCollectionTests(TestCase):
         self.client.post(f"/api/bookings/{b['booking_id']}/pay-advance/", {'payment_mode': 'UPI'}, format='json')
         res = self.client.post(f"/api/bookings/{b['booking_id']}/pay-at-collection/")
         self.assertEqual(res.status_code, 400)
+
+
+@override_settings(MEDIA_ROOT=TEST_MEDIA)
+class HouseholdOrderTests(TestCase):
+    """Several patients, one address, one slot, one visit, one checkout — but one booking per patient."""
+
+    setUp_base = FullApplicationFlowTests.setUp
+
+    def setUp(self):
+        self.setUp_base()
+        self.spouse = FamilyMember.objects.create(
+            user=self.user, name='Sita Ram', relationship='SPOUSE', date_of_birth='1996-02-01', gender='FEMALE',
+        )
+
+    def body(self, patients=None, **extra):
+        return {
+            'partner_id': self.partner.id, 'service_mode': 'HOME_COLLECTION', 'slot_id': self.slot.id,
+            'collection_address': '16-32, mvpeta', 'collection_city': 'Hyderabad', 'collection_pincode': '500081',
+            'test_ids': [self.test1.id], 'package_ids': [],
+            'patients': patients if patients is not None else [
+                {'patient_type': 'SELF'},
+                {'patient_type': 'FAMILY_MEMBER', 'family_member_id': self.family_member.id},
+                {'patient_type': 'FAMILY_MEMBER', 'family_member_id': self.spouse.id},
+            ],
+            **extra,
+        }
+
+    def create(self, **kw):
+        res = self.client.post('/api/bookings/group/', self.body(**kw), format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        return res.data
+
+    # ── pricing ──
+    def test_split_amount_is_exact(self):
+        from bookings.services import split_amount
+        self.assertEqual(split_amount(Decimal('100'), 3), [Decimal('33.34'), Decimal('33.33'), Decimal('33.33')])
+        self.assertEqual(sum(split_amount(Decimal('150'), 4)), Decimal('150.00'))
+        self.assertEqual(split_amount(Decimal('150'), 1), [Decimal('150.00')])
+
+    def test_estimate_charges_visit_fee_once(self):
+        res = self.client.post('/api/bookings/price-estimate/', {
+            'partner_id': self.partner.id, 'service_mode': 'HOME_COLLECTION', 'test_ids': [self.test1.id], 'patient_count': 3,
+        }, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        e = res.data['estimate']
+        self.assertEqual(e['patient_count'], 3)
+        self.assertEqual(e['per_patient_subtotal'], 500.0)
+        self.assertEqual(e['subtotal_amount'], 1500.0)
+        self.assertEqual(e['home_collection_fee'], 150.0)
+        self.assertEqual(e['total_amount'], 1650.0)
+        self.assertAlmostEqual(e['advance_amount_due_30_percent'] + e['balance_amount_due_70_percent'], 1650.0)
+        self.assertEqual([p['home_collection_fee'] for p in e['per_patient']], [50.0, 50.0, 50.0])
+        self.assertNotIn('_ledgers', e)
+
+    def test_estimate_rejects_too_many_patients(self):
+        res = self.client.post('/api/bookings/price-estimate/', {
+            'partner_id': self.partner.id, 'service_mode': 'HOME_COLLECTION', 'test_ids': [self.test1.id], 'patient_count': 99,
+        }, format='json')
+        self.assertEqual(res.status_code, 400)
+
+    # ── creation ──
+    def test_creates_one_booking_per_patient_with_shared_address_and_slot(self):
+        data = self.create()
+        group, bookings = data['group'], data['bookings']
+        self.assertEqual(group['patient_count'], 3)
+        self.assertEqual(Decimal(group['total_amount']), Decimal('1650.00'))
+        self.assertEqual(len(bookings), 3)
+        self.assertEqual({b['group_ref'] for b in bookings}, {group['group_ref']})
+        self.assertEqual([b['patient_name'] for b in bookings], ['Habhi Ram', 'John Ram', 'Sita Ram'])
+        self.assertEqual({b['collection_address'] for b in bookings}, {'16-32, mvpeta'})
+        self.assertEqual(sum(Decimal(b['home_collection_fee']) for b in bookings), Decimal('150.00'))
+        self.assertEqual(len(bookings[0]['group_members']), 3)
+        self.assertTrue(all(len(b['items']) == 1 for b in bookings))
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 0)  # drafts hold no seats
+
+    def test_duplicate_patient_rejected(self):
+        res = self.client.post('/api/bookings/group/', self.body(patients=[{'patient_type': 'SELF'}, {'patient_type': 'SELF'}]), format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['code'], 'duplicate_patient')
+        self.assertFalse(Booking.objects.exists())
+
+    def test_someone_elses_family_member_rejected_and_nothing_created(self):
+        other = User.objects.create_user(phone_number='+919000000088', is_phone_verified=True)
+        stranger = FamilyMember.objects.create(user=other, name='X', relationship='OTHER', gender='MALE')
+        res = self.client.post('/api/bookings/group/', self.body(patients=[
+            {'patient_type': 'SELF'}, {'patient_type': 'FAMILY_MEMBER', 'family_member_id': stranger.id},
+        ]), format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse(Booking.objects.exists())
+
+    def test_slot_must_seat_everyone(self):
+        self.slot.max_capacity = 2
+        self.slot.save()
+        res = self.client.post('/api/bookings/group/', self.body(), format='json')
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data['code'], 'slot_full')
+        self.assertIn('not enough for 3 patients', res.data['message'])
+
+    # ── checkout ──
+    def test_one_payment_seats_everyone_under_one_transaction(self):
+        ref = self.create()['group']['group_ref']
+        before = Notification.objects.filter(user=self.user, notification_type='PAYMENT_RESULT').count()
+        res = self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {'payment_mode': 'UPI', 'transaction_id': 'TXN-HOUSE-1'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual({b['booking_status'] for b in res.data['bookings']}, {'AWAITING_PARTNER_CONFIRMATION'})
+        self.assertEqual(len(res.data['payments']), 3)
+        self.assertEqual({p['gateway_transaction_id'] for p in res.data['payments']}, {'TXN-HOUSE-1'})
+        self.assertEqual(Decimal(res.data['group']['amount_paid']), Decimal(res.data['group']['advance_amount_due']))
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 3)
+        # One summary message for the patient, one for the lab — not one per person.
+        self.assertEqual(Notification.objects.filter(user=self.user, notification_type='PAYMENT_RESULT').count(), before + 1)
+        self.assertEqual(Notification.objects.filter(user=self.partner_user, notification_type='BOOKING_REMINDER').count(), 1)
+        # Paying twice is refused.
+        again = self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {}, format='json')
+        self.assertEqual(again.status_code, 409)
+
+    def test_payment_is_all_or_nothing_when_seats_vanish(self):
+        ref = self.create()['group']['group_ref']
+        self.slot.booked_count = 3  # someone else took seats meanwhile (5 - 3 = 2 left for 3 patients)
+        self.slot.save()
+        res = self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {}, format='json')
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(set(Booking.objects.filter(group_ref=ref).values_list('booking_status', flat=True)), {'AWAITING_ADVANCE_PAYMENT'})
+        self.assertFalse(Payment.objects.exists())
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 3)
+
+    def test_same_patient_cannot_hold_two_seats_in_a_slot(self):
+        ref = self.create(patients=[{'patient_type': 'SELF'}, {'patient_type': 'FAMILY_MEMBER', 'family_member_id': self.spouse.id}])['group']['group_ref']
+        self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {}, format='json')
+        res = self.client.post('/api/bookings/group/', self.body(patients=[{'patient_type': 'SELF'}, {'patient_type': 'FAMILY_MEMBER', 'family_member_id': self.family_member.id}]), format='json')
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(res.data['code'], 'patient_already_booked')
+
+    def test_pay_at_collection_counts_the_household_as_one_order(self):
+        ref = self.create()['group']['group_ref']
+        res = self.client.post(f'/api/bookings/group/{ref}/pay-at-collection/', {}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['group']['payment_plan'], 'PAY_AT_COLLECTION')
+        self.assertEqual(Decimal(res.data['group']['amount_outstanding']), Decimal('1650.00'))
+        from bookings.services import pay_at_collection_eligibility
+        ok, _ = pay_at_collection_eligibility(self.partner, Decimal('500'), self.user)
+        self.assertTrue(ok)  # 1 open order < limit of 2, although it has 3 unpaid bookings
+
+    # ── after checkout ──
+    def test_cancelling_one_patient_refunds_only_their_share(self):
+        data = self.create()
+        ref = data['group']['group_ref']
+        self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {}, format='json')
+        john = Booking.objects.get(group_ref=ref, family_member=self.family_member)
+        res = self.client.post(f'/api/bookings/{john.booking_id}/cancel/', {'reason': 'Travelling that day'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        john.refresh_from_db()
+        self.assertEqual(john.payment_status, 'REFUNDED')
+        self.assertEqual(john.payments.get(payment_type='REFUND').amount, john.advance_amount_due)
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 2)
+        group = self.client.get(f'/api/bookings/group/{ref}/').data['group']
+        self.assertEqual(group['active_count'], 2)
+        self.assertEqual(Decimal(group['total_amount']), Decimal('1100.00'))  # 2 × 500 + their 2 × 50 fee shares
+
+    def test_cancel_whole_order(self):
+        ref = self.create()['group']['group_ref']
+        self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {}, format='json')
+        res = self.client.post(f'/api/bookings/group/{ref}/cancel/', {'reason': 'Plans changed'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual({b['booking_status'] for b in res.data['bookings']}, {'CANCELLED'})
+        self.slot.refresh_from_db()
+        self.assertEqual(self.slot.booked_count, 0)
+        self.assertEqual(Notification.objects.filter(user=self.user, notification_type='BOOKING_CANCELLED').count(), 1)
+
+    def test_partner_can_run_each_patient_independently(self):
+        ref = self.create()['group']['group_ref']
+        self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {}, format='json')
+        a, b, c = Booking.objects.filter(group_ref=ref).order_by('pk')
+        partner_accept_booking(a, self.partner_user)
+        partner_reject_booking(b, self.partner_user, 'Child sample needs a paediatric kit')
+        self.assertEqual(Booking.objects.get(pk=a.pk).booking_status, 'CONFIRMED')
+        self.assertEqual(Booking.objects.get(pk=b.pk).booking_status, 'REJECTED_BY_PARTNER')
+        self.assertEqual(Booking.objects.get(pk=c.pk).booking_status, 'AWAITING_PARTNER_CONFIRMATION')
+
+    def test_strangers_cannot_see_or_pay_an_order(self):
+        ref = self.create()['group']['group_ref']
+        other = User.objects.create_user(phone_number='+919000000099', is_phone_verified=True)
+        self.client.force_authenticate(user=other)
+        self.assertEqual(self.client.get(f'/api/bookings/group/{ref}/').status_code, 404)
+        self.assertEqual(self.client.post(f'/api/bookings/group/{ref}/pay-advance/', {}, format='json').status_code, 404)
+
+    def test_single_booking_has_no_group(self):
+        b, err = create_booking_order(self.user, {
+            'partner_id': self.partner.id, 'service_mode': 'CENTRE_VISIT', 'slot_id': self.slot.id, 'test_ids': [self.test1.id],
+        })
+        self.assertIsNone(err)
+        self.assertEqual(b.group_ref, '')
+        self.assertEqual(b.home_collection_fee, Decimal('0.00'))
