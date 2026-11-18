@@ -160,9 +160,20 @@ class FamilyMember(models.Model):
     date_of_birth = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=20, choices=GENDER_CHOICES)
     contact_number = models.CharField(max_length=17, blank=True)
+    is_phone_verified = models.BooleanField(
+        default=False,
+        help_text="Whether contact_number was confirmed via OTP sent to that number."
+    )
+    phone_verified_at = models.DateTimeField(null=True, blank=True)
     email = models.EmailField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # Relationships for which a mobile number is optional (dependents who
+    # typically don't own a phone). Everyone else must have a verified number.
+    PHONE_OPTIONAL_RELATIONSHIPS = frozenset({'CHILD'})
+    # Anyone younger than this is treated as a minor (phone optional).
+    ADULT_AGE = 18
 
     class Meta:
         verbose_name = 'Family Member'
@@ -191,6 +202,7 @@ class PhoneOTP(models.Model):
         ('REGISTRATION', 'Registration'),
         ('LOGIN', 'Login'),
         ('PASSWORD_RESET', 'Password Reset'),
+        ('FAMILY_MEMBER', 'Family Member Phone'),
     )
 
     phone_number = models.CharField(max_length=17, db_index=True)

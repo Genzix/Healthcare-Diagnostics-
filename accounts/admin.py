@@ -109,7 +109,7 @@ class UserAdmin(BaseUserAdmin):
 
 @admin.register(FamilyMember)
 class FamilyMemberAdmin(admin.ModelAdmin):
-    list_display = ('name', 'relationship', 'user', 'gender', 'date_of_birth', 'contact_number', 'created_at')
+    list_display = ('name', 'relationship', 'user', 'gender', 'date_of_birth', 'contact_number', 'is_phone_verified', 'created_at')
     list_filter = ('relationship', 'gender', 'created_at')
     search_fields = ('name', 'user__phone_number', 'contact_number')
 

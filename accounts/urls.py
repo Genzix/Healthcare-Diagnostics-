@@ -16,6 +16,8 @@ from .views import (
     UserProfileView,
     FamilyMemberListCreateView,
     FamilyMemberDetailView,
+    FamilyPhoneSendOTPView,
+    FamilyPhoneVerifyOTPView,
     # Health Card Views
     HealthCardDetailView,
     HealthCardProfileUpdateView,
@@ -64,6 +66,8 @@ urlpatterns = [
 
     # Family Member Profiles
     path('api/family-members/', FamilyMemberListCreateView.as_view(), name='api_family_members_list_create'),
+    path('api/family-members/phone/send-otp/', FamilyPhoneSendOTPView.as_view(), name='api_family_phone_send_otp'),
+    path('api/family-members/phone/verify-otp/', FamilyPhoneVerifyOTPView.as_view(), name='api_family_phone_verify_otp'),
     path('api/family-members/<int:pk>/', FamilyMemberDetailView.as_view(), name='api_family_member_detail'),
 
     # Health Card Modules (1MinDoc Health Card)

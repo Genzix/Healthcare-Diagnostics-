@@ -405,3 +405,144 @@ class AdminPanelUsersAndFamilyTests(TestCase):
 
 
 
+
+
+class FamilyMemberPhoneVerificationTests(TestCase):
+    """Adults need an OTP-verified phone; children / minors may skip it."""
+
+    SEND = '/api/family-members/phone/send-otp/'
+    VERIFY = '/api/family-members/phone/verify-otp/'
+    LIST = '/api/family-members/'
+
+    def setUp(self):
+        from django.test import override_settings
+        self._settings = override_settings(OTP_RESEND_WAIT_SECONDS=0)
+        self._settings.enable()
+        self.addCleanup(self._settings.disable)
+        self.user = User.objects.create_user(phone_number='+919876543210', first_name='Asha', is_phone_verified=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def _otp(self, phone):
+        return PhoneOTP.objects.filter(purpose='FAMILY_MEMBER', phone_number=phone).latest('created_at')
+
+    def _verified_token(self, phone='9123456780'):
+        self.assertEqual(self.client.post(self.SEND, {'phone_number': phone}).status_code, 200)
+        otp = self._otp('+91' + phone[-10:])
+        res = self.client.post(self.VERIFY, {'phone_number': phone, 'otp': otp.otp_code})
+        self.assertEqual(res.status_code, 200, res.data)
+        return res.data['verification_token']
+
+    def _adult(self, **extra):
+        return {'name': 'Ravi', 'relationship': 'SPOUSE', 'gender': 'MALE', 'date_of_birth': '1990-01-01', **extra}
+
+    def test_adult_requires_phone(self):
+        res = self.client.post(self.LIST, self._adult(), format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('phone_number', res.data['errors'])
+
+    def test_adult_with_unverified_phone_rejected(self):
+        res = self.client.post(self.LIST, self._adult(phone_number='+919123456780'), format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('Verify', str(res.data['errors']['phone_number']))
+
+    def test_child_without_phone_allowed(self):
+        res = self.client.post(self.LIST, {'name': 'Kid', 'relationship': 'CHILD', 'gender': 'FEMALE', 'date_of_birth': '2018-05-05'}, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertFalse(res.data['family_member']['phone_required'])
+
+    def test_minor_sibling_without_phone_allowed(self):
+        dob = (timezone.localdate() - timedelta(days=365 * 12)).isoformat()
+        res = self.client.post(self.LIST, {'name': 'Bro', 'relationship': 'SIBLING', 'gender': 'MALE', 'date_of_birth': dob}, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+
+    def test_full_flow_creates_verified_member(self):
+        token = self._verified_token()
+        res = self.client.post(self.LIST, self._adult(phone_number='9123456780', phone_verification_token=token), format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        m = res.data['family_member']
+        self.assertEqual(m['phone_number'], '+919123456780')
+        self.assertTrue(m['is_phone_verified'])
+        self.assertNotIn('phone_verification_token', m)
+
+    def test_token_is_single_use(self):
+        token = self._verified_token()
+        self.client.post(self.LIST, self._adult(phone_number='9123456780', phone_verification_token=token), format='json')
+        res = self.client.post(self.LIST, self._adult(name='Other', phone_number='9123456780', phone_verification_token=token), format='json')
+        self.assertEqual(res.status_code, 400)
+
+    def test_token_bound_to_phone(self):
+        token = self._verified_token('9123456780')
+        res = self.client.post(self.LIST, self._adult(phone_number='9000000001', phone_verification_token=token), format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('not the one verified', str(res.data['errors']['phone_number']))
+
+    def test_token_bound_to_account(self):
+        token = self._verified_token()
+        other = User.objects.create_user(phone_number='+919000000099', is_phone_verified=True)
+        c = APIClient(); c.force_authenticate(other)
+        res = c.post(self.LIST, self._adult(phone_number='9123456780', phone_verification_token=token), format='json')
+        self.assertEqual(res.status_code, 400)
+
+    def test_own_number_rejected(self):
+        res = self.client.post(self.SEND, {'phone_number': '9876543210'})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data['code'], 'own_phone')
+
+    def test_wrong_otp_counts_attempts_then_locks(self):
+        self.client.post(self.SEND, {'phone_number': '9123456780'})
+        for i in range(4):
+            res = self.client.post(self.VERIFY, {'phone_number': '9123456780', 'otp': '000000' if self._otp('+919123456780').otp_code != '000000' else '111111'})
+            self.assertEqual(res.data['code'], 'otp_mismatch')
+        res = self.client.post(self.VERIFY, {'phone_number': '9123456780', 'otp': '000000' if self._otp('+919123456780').otp_code != '000000' else '111111'})
+        self.assertEqual(res.data['code'], 'otp_locked')
+        res = self.client.post(self.VERIFY, {'phone_number': '9123456780', 'otp': self._otp('+919123456780').otp_code})
+        self.assertEqual(res.data['code'], 'otp_locked')
+
+    def test_resend_cooldown(self):
+        from django.test import override_settings
+        with override_settings(OTP_RESEND_WAIT_SECONDS=60):
+            self.client.post(self.SEND, {'phone_number': '9123456780'})
+            res = self.client.post(self.SEND, {'phone_number': '9123456780'})
+        self.assertEqual(res.status_code, 429)
+        self.assertEqual(res.data['code'], 'resend_cooldown')
+        self.assertIn('Retry-After', res)
+
+    def test_new_code_invalidates_previous(self):
+        self.client.post(self.SEND, {'phone_number': '9123456780'})
+        old = self._otp('+919123456780').otp_code
+        self.client.post(self.SEND, {'phone_number': '9123456780'})
+        new = self._otp('+919123456780').otp_code
+        if old != new:
+            PhoneOTP.objects.filter(otp_code=new).update(otp_code='999999' if old != '999999' else '888888')
+            res = self.client.post(self.VERIFY, {'phone_number': '9123456780', 'otp': old})
+            self.assertEqual(res.data['code'], 'otp_mismatch')
+
+    def test_duplicate_number_in_family_rejected(self):
+        token = self._verified_token()
+        self.client.post(self.LIST, self._adult(phone_number='9123456780', phone_verification_token=token), format='json')
+        res = self.client.post(self.SEND, {'phone_number': '+91 91234 56780'})
+        self.assertEqual(res.data['code'], 'duplicate_phone')
+
+    def test_edit_without_changing_verified_phone_needs_no_otp(self):
+        token = self._verified_token()
+        mid = self.client.post(self.LIST, self._adult(phone_number='9123456780', phone_verification_token=token), format='json').data['family_member']['id']
+        res = self.client.put(f'{self.LIST}{mid}/', self._adult(name='Ravi Kumar', phone_number='+919123456780'), format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertTrue(res.data['family_member']['is_phone_verified'])
+
+    def test_edit_changing_phone_needs_new_otp(self):
+        token = self._verified_token()
+        mid = self.client.post(self.LIST, self._adult(phone_number='9123456780', phone_verification_token=token), format='json').data['family_member']['id']
+        res = self.client.put(f'{self.LIST}{mid}/', self._adult(phone_number='9000000001'), format='json')
+        self.assertEqual(res.status_code, 400)
+
+    def test_changing_child_to_spouse_requires_phone(self):
+        mid = self.client.post(self.LIST, {'name': 'Kid', 'relationship': 'CHILD', 'gender': 'FEMALE', 'date_of_birth': '2018-05-05'}, format='json').data['family_member']['id']
+        res = self.client.patch(f'{self.LIST}{mid}/', {'relationship': 'SPOUSE', 'date_of_birth': '1990-01-01'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('phone_number', res.data['errors'])
+
+    def test_send_requires_auth(self):
+        res = APIClient().post(self.SEND, {'phone_number': '9123456780'})
+        self.assertIn(res.status_code, (401, 403))

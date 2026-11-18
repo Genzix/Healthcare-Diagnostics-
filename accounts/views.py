@@ -25,6 +25,8 @@ from .serializers import (
     PasswordLoginSerializer,
     UserProfileUpdateSerializer,
     FamilyMemberSerializer,
+    FamilyPhoneSendOTPSerializer,
+    FamilyPhoneVerifyOTPSerializer,
     HealthProfileBasicSerializer,
     BodyMetricsInputSerializer,
     VitalsInputSerializer,
@@ -41,6 +43,11 @@ from .services import (
     verify_login_otp,
     authenticate_with_password,
     get_tokens_for_user,
+)
+from .family_phone import (
+    FamilyPhoneError,
+    send_family_phone_otp,
+    verify_family_phone_otp,
 )
 
 
@@ -428,7 +435,7 @@ class FamilyMemberListCreateView(APIView):
 
     def get(self, request, *args, **kwargs):
         members = FamilyMember.objects.filter(user=request.user)
-        serializer = FamilyMemberSerializer(members, many=True)
+        serializer = FamilyMemberSerializer(members, many=True, context={'request': request})
         return Response(
             {
                 "success": True,
@@ -439,7 +446,7 @@ class FamilyMemberListCreateView(APIView):
         )
 
     def post(self, request, *args, **kwargs):
-        serializer = FamilyMemberSerializer(data=request.data)
+        serializer = FamilyMemberSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return Response(
                 {
@@ -494,10 +501,10 @@ class FamilyMemberDetailView(APIView):
                 {"success": False, "message": "Family member not found."},
                 status=status.HTTP_404_NOT_FOUND
             )
-        serializer = FamilyMemberSerializer(member, data=request.data, partial=True)
+        serializer = FamilyMemberSerializer(member, data=request.data, partial=True, context={'request': request})
         if not serializer.is_valid():
             return Response(
-                {"success": False, "errors": serializer.errors},
+                {"success": False, "errors": serializer.errors, "message": "Failed to update family member."},
                 status=status.HTTP_400_BAD_REQUEST
             )
         serializer.save()
@@ -525,6 +532,68 @@ class FamilyMemberDetailView(APIView):
                 "message": f"Family member {member_name} removed successfully.",
             },
             status=status.HTTP_200_OK
+        )
+
+
+def _family_phone_error(e: FamilyPhoneError):
+    body = {"success": False, "code": e.code, "message": e.message, **e.extra}
+    resp = Response(body, status=e.status)
+    if e.extra.get('retry_after_seconds'):
+        resp['Retry-After'] = str(e.extra['retry_after_seconds'])
+    return resp
+
+
+class FamilyPhoneSendOTPView(APIView):
+    """
+    API endpoint: Send an OTP to a family member's mobile number.
+    Body: { phone_number, member_id?, name? }
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        serializer = FamilyPhoneSendOTPSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"success": False, "errors": serializer.errors, "message": "Enter a valid mobile number."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        d = serializer.validated_data
+        try:
+            otp, info = send_family_phone_otp(
+                request.user, d['phone_number'], member_id=d.get('member_id'), member_name=d.get('name', ''),
+            )
+        except FamilyPhoneError as e:
+            return _family_phone_error(e)
+
+        data = {"success": True, "message": f"Code sent to {info['masked_phone']}.", **info}
+        if getattr(settings, 'SHOW_DEBUG_OTP', False):
+            data["debug_otp"] = otp.otp_code
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class FamilyPhoneVerifyOTPView(APIView):
+    """
+    API endpoint: Verify a family member phone OTP.
+    Body: { phone_number, otp } → { verification_token, expires_in_seconds }
+    Pass `phone_verification_token` when creating/updating the member.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        serializer = FamilyPhoneVerifyOTPSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {"success": False, "errors": serializer.errors, "message": "Enter the 6-digit code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        d = serializer.validated_data
+        try:
+            token, info = verify_family_phone_otp(request.user, d['phone_number'], d['otp'])
+        except FamilyPhoneError as e:
+            return _family_phone_error(e)
+        return Response(
+            {"success": True, "message": "Number verified.", "verification_token": token, **info},
+            status=status.HTTP_200_OK,
         )
 
 

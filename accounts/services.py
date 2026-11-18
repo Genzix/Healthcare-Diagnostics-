@@ -20,13 +20,13 @@ def normalize_phone_number(phone_number: str) -> str:
     return cleaned
 
 
-def send_sms_otp(phone_number: str, otp_code: str) -> bool:
+def send_sms_otp(phone_number: str, otp_code: str, message: str = None) -> bool:
     """
     Dispatches OTP via SMS service.
     In local development and testing, logs the OTP to console and logger.
     Easily configurable with external SMS gateways (Twilio, MSG91, AWS SNS, etc.).
     """
-    message = (
+    message = message or (
         f"[Healthcare Diagnostics] Your registration OTP is {otp_code}. "
         f"Valid for {getattr(settings, 'OTP_EXPIRY_MINUTES', 5)} minutes. "
         "Do not share this code with anyone."

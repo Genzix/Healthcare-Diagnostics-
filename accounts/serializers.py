@@ -1,4 +1,6 @@
 import re
+from django.db import transaction
+from django.utils import timezone
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import PhoneOTP, FamilyMember, phone_validator
@@ -207,15 +209,100 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
 class FamilyMemberSerializer(serializers.ModelSerializer):
     """
     Serializer for adding, editing, and viewing family member profiles.
+
+    Phone rules (see accounts/family_phone.py):
+    - Required for adults; optional for children / members under 18.
+    - Any new or changed number must carry a ``phone_verification_token``
+      obtained from POST /api/family-members/phone/verify-otp/.
+    - Accepts ``phone_number`` (preferred) or legacy ``contact_number`` on input.
     """
     age = serializers.IntegerField(source='get_age', read_only=True)
     mobile = serializers.CharField(source='contact_number', read_only=True)
+    phone_number = serializers.CharField(
+        source='contact_number', required=False, allow_blank=True, allow_null=True, max_length=20,
+    )
+    contact_number = serializers.CharField(read_only=True)
+    phone_verification_token = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True)
+    phone_required = serializers.SerializerMethodField()
     primary_account = serializers.CharField(source='user.phone_number', read_only=True)
     account_status = serializers.SerializerMethodField()
     added = serializers.DateTimeField(source='created_at', read_only=True)
 
     def get_account_status(self, obj):
         return "Active" if getattr(obj.user, 'is_active', True) else "Inactive"
+
+    def get_phone_required(self, obj):
+        from .family_phone import phone_required_for
+        return phone_required_for(obj.relationship, obj.date_of_birth)
+
+    def to_internal_value(self, data):
+        # `phone_number` wins over the legacy `contact_number` alias when both are sent.
+        if 'phone_number' not in data and 'contact_number' in data:
+            data = data.copy()
+            data['phone_number'] = data.get('contact_number')
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        from .family_phone import (
+            FamilyPhoneError, canonical_phone, check_verification_token,
+            phone_required_for, same_phone, validate_phone_for_owner,
+        )
+        request = self.context.get('request')
+        owner = getattr(request, 'user', None)
+        if owner is None or not owner.is_authenticated:
+            raise serializers.ValidationError('Authentication required.')
+
+        inst = self.instance
+        token = attrs.pop('phone_verification_token', None)
+        relationship = attrs.get('relationship', getattr(inst, 'relationship', None))
+        dob = attrs.get('date_of_birth', getattr(inst, 'date_of_birth', None))
+        required = phone_required_for(relationship, dob)
+
+        phone_sent = 'contact_number' in attrs
+        current = getattr(inst, 'contact_number', '') or ''
+        raw = attrs.get('contact_number') if phone_sent else current
+        raw = (raw or '').strip()
+
+        if not raw:
+            if required:
+                raise serializers.ValidationError({'phone_number': [
+                    'Mobile number is required. Only children and members under 18 can be added without one.'
+                ]}, code='phone_required')
+            attrs.update(contact_number='', is_phone_verified=False, phone_verified_at=None)
+            return attrs
+
+        try:
+            phone = validate_phone_for_owner(owner, raw, getattr(inst, 'pk', None))
+        except FamilyPhoneError as e:
+            raise serializers.ValidationError({'phone_number': [e.message]}, code=e.code)
+
+        unchanged = inst is not None and same_phone(current, phone)
+        already_verified = unchanged and inst.is_phone_verified
+        # A legacy, unverified number on a phone-optional member may be kept as is.
+        keep_unverified = unchanged and not inst.is_phone_verified and not required and not token
+
+        if already_verified or keep_unverified:
+            attrs['contact_number'] = canonical_phone(current)
+            return attrs
+
+        try:
+            self._otp_to_consume = check_verification_token(owner, phone, token)
+        except FamilyPhoneError as e:
+            raise serializers.ValidationError({'phone_number': [e.message]}, code=e.code)
+
+        attrs.update(contact_number=phone, is_phone_verified=True, phone_verified_at=timezone.now())
+        return attrs
+
+    def save(self, **kwargs):
+        from .family_phone import FamilyPhoneError, consume_verification_token
+        with transaction.atomic():
+            otp_id = getattr(self, '_otp_to_consume', None)
+            if otp_id:
+                try:
+                    consume_verification_token(otp_id)
+                except FamilyPhoneError as e:
+                    raise serializers.ValidationError({'phone_number': [e.message]}, code=e.code)
+            return super().save(**kwargs)
 
     class Meta:
         model = FamilyMember
@@ -226,8 +313,13 @@ class FamilyMemberSerializer(serializers.ModelSerializer):
             'date_of_birth',
             'age',
             'gender',
+            'phone_number',
             'contact_number',
             'mobile',
+            'is_phone_verified',
+            'phone_verified_at',
+            'phone_required',
+            'phone_verification_token',
             'primary_account',
             'account_status',
             'email',
@@ -235,7 +327,18 @@ class FamilyMemberSerializer(serializers.ModelSerializer):
             'added',
             'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'is_phone_verified', 'phone_verified_at']
+
+
+class FamilyPhoneSendOTPSerializer(serializers.Serializer):
+    phone_number = serializers.CharField(max_length=20)
+    member_id = serializers.IntegerField(required=False, allow_null=True)
+    name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+
+
+class FamilyPhoneVerifyOTPSerializer(serializers.Serializer):
+    phone_number = serializers.CharField(max_length=20)
+    otp = serializers.CharField(min_length=4, max_length=6, trim_whitespace=True)
 
 
 class SendOTPLoginSerializer(serializers.Serializer):
