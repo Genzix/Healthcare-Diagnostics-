@@ -148,6 +148,8 @@ class BookingDetailSerializer(serializers.ModelSerializer):
     has_report = serializers.SerializerMethodField()
     report_notes = serializers.SerializerMethodField()
     report_verified_by_name = serializers.SerializerMethodField()
+    report_access = serializers.SerializerMethodField()
+    report_locked = serializers.SerializerMethodField()
     amount_paid = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     amount_outstanding = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     payment_options = serializers.SerializerMethodField()
@@ -172,8 +174,8 @@ class BookingDetailSerializer(serializers.ModelSerializer):
             'booking_status', 'status_label', 'payment_status', 'payment_plan', 'amount_paid', 'amount_outstanding',
             'payment_options', 'lab_progress', 'next_actions', 'can_cancel',
             'partner_rejection_reason', 'cancelled_by', 'cancellation_reason', 'cancellation_time',
-            'has_report', 'report_download_url', 'report_name', 'report_notes', 'report_uploaded_at',
-            'report_file_size', 'report_file_sha256',
+            'has_report', 'report_locked', 'report_access', 'report_download_url', 'report_name', 'report_notes',
+            'report_uploaded_at', 'report_file_size', 'report_file_sha256',
             'report_verified_by_name', 'report_verified_by_registration', 'report_verified_at',
             'report_released_at', 'patient_notified_at',
             'report_first_downloaded_at', 'report_last_downloaded_at', 'report_download_count',
@@ -184,13 +186,23 @@ class BookingDetailSerializer(serializers.ModelSerializer):
 
     def to_representation(self, obj):
         data = super().to_representation(obj)
-        if _audience(self) == wf.PATIENT and not obj.is_report_released:
+        if not self._visible_to_patient(obj):
             for f in self.REPORT_PRIVATE_FIELDS:
                 data[f] = None
         return data
 
     def _visible_to_patient(self, obj):
-        return _audience(self) != wf.PATIENT or obj.is_report_released
+        """Results reach the patient only once released AND fully paid; partner/admin always see them."""
+        from .services import is_report_visible_to_patient
+        return _audience(self) != wf.PATIENT or is_report_visible_to_patient(obj)
+
+    def get_report_access(self, obj):
+        """{state: PENDING | PAYMENT_REQUIRED | AVAILABLE, locked, amount_due, message} — drives the report card."""
+        from .services import patient_report_state
+        return patient_report_state(obj)
+
+    def get_report_locked(self, obj):
+        return self.get_report_access(obj)['locked']
 
     def get_status_label(self, obj):
         return wf.LABELS.get(obj.booking_status, obj.booking_status)
@@ -221,8 +233,12 @@ class BookingDetailSerializer(serializers.ModelSerializer):
         logs = obj.status_logs.all()
         if _audience(self) == wf.PATIENT:
             # Internal QA notes (e.g. a verifier's send-back reason) stay inside the lab.
+            # Release notes can carry results, so they wait for payment too.
+            hidden = {wf.REPORT_GENERATED, wf.REPORT_UPLOADED, wf.REPORT_VERIFIED}
+            if not self._visible_to_patient(obj):
+                hidden |= {wf.REPORT_READY}
             return [
-                {**row, 'notes': '' if row['to_status'] in (wf.REPORT_GENERATED, wf.REPORT_UPLOADED, wf.REPORT_VERIFIED) else row['notes']}
+                {**row, 'notes': '' if row['to_status'] in hidden else row['notes']}
                 for row in BookingStatusLogSerializer(logs, many=True).data
             ]
         return BookingStatusLogSerializer(logs, many=True).data
@@ -274,6 +290,7 @@ class BookingListSerializer(serializers.ModelSerializer):
             'payment_plan',
             'lab_progress',
             'has_report',
+            'report_locked',
             'items_count',
             'created_at',
             'updated_at',
@@ -282,6 +299,7 @@ class BookingListSerializer(serializers.ModelSerializer):
     status_label = serializers.SerializerMethodField()
     lab_progress = serializers.SerializerMethodField()
     has_report = serializers.SerializerMethodField()
+    report_locked = serializers.SerializerMethodField()
 
     def get_status_label(self, obj):
         return wf.LABELS.get(obj.booking_status, obj.booking_status)
@@ -290,7 +308,12 @@ class BookingListSerializer(serializers.ModelSerializer):
         return wf.progress(obj.booking_status)
 
     def get_has_report(self, obj):
-        return bool(obj.report_file) and obj.is_report_released
+        from .services import is_report_visible_to_patient
+        return is_report_visible_to_patient(obj)
+
+    def get_report_locked(self, obj):
+        from .services import patient_report_state
+        return patient_report_state(obj)['locked']
 
 
 class PriceEstimateRequestSerializer(serializers.Serializer):

@@ -104,6 +104,10 @@ def validate_report_pdf(upload):
 def _patient_message(step, booking):
     partner = booking.partner.centre_name if booking.partner_id else 'your diagnostic centre'
     msg = step.notify_message.format(booking_id=booking.booking_id, partner=partner)
+    if step.target == wf.REPORT_READY and not is_report_payment_cleared(booking):
+        # Don't tell an unpaid patient to "download" something they can't open yet.
+        msg = (f"Your verified report for booking {booking.booking_id} from {partner} is ready. "
+               f"Pay the outstanding ₹{booking.amount_outstanding:.2f} in the app to unlock and download it.")
     if booking.patient_type == 'FAMILY_MEMBER' and booking.patient_name:
         msg = f"{msg} (Patient: {booking.patient_name})"
     return msg
@@ -265,12 +269,51 @@ def record_report_download(booking, user):
     return booking
 
 
+# Patient-facing report states (also sent to clients as `report_access.state`).
+REPORT_STATE_PENDING = 'PENDING'                    # lab hasn't released it yet
+REPORT_STATE_PAYMENT_REQUIRED = 'PAYMENT_REQUIRED'  # released, but money is still owed
+REPORT_STATE_AVAILABLE = 'AVAILABLE'                # released and fully paid
+
+
+def report_payment_required():
+    """Reports and results are released to patients only once the booking is fully paid (on by default)."""
+    return getattr(settings, 'REPORT_REQUIRES_FULL_PAYMENT', True)
+
+
+def is_report_payment_cleared(booking):
+    """Nothing left to pay. Uses the ledger (amount_outstanding), not just the status flag."""
+    if not report_payment_required():
+        return True
+    return booking.payment_status == 'FULLY_PAID' or booking.amount_outstanding <= Decimal('0.00')
+
+
+def patient_report_state(booking):
+    """
+    The patient's view of their report — the one rule every surface uses
+    (detail/list payloads, the download endpoint, notifications):
+      {state, locked, amount_due, message}
+    `locked` means: the report is released but withheld until the balance is paid.
+    """
+    if not booking.report_file or booking.booking_status not in wf.REPORT_RELEASED:
+        return {'state': REPORT_STATE_PENDING, 'locked': False, 'amount_due': None,
+                'message': "Your report is still being processed. You'll be notified when it is ready."}
+    if not is_report_payment_cleared(booking):
+        due = booking.amount_outstanding
+        return {'state': REPORT_STATE_PAYMENT_REQUIRED, 'locked': True, 'amount_due': f"{due:.2f}",
+                'message': f"Your report is ready. Pay the outstanding ₹{due:.2f} to view and download it."}
+    return {'state': REPORT_STATE_AVAILABLE, 'locked': False, 'amount_due': '0.00', 'message': ''}
+
+
+def is_report_visible_to_patient(booking):
+    return patient_report_state(booking)['state'] == REPORT_STATE_AVAILABLE
+
+
 def report_access(booking, user, partner=None):
     """
     Who may fetch the report file:
       - staff/admin: always (if a file exists)
       - the booking's partner: once uploaded (needed to verify it)
-      - the patient account: only after release (and, if configured, after full payment)
+      - the patient account: only after release AND full payment
     Returns (allowed: bool, audience: str, reason: str).
     """
     if not booking.report_file:
@@ -280,11 +323,8 @@ def report_access(booking, user, partner=None):
     if partner is not None and booking.partner_id == partner.pk:
         return True, wf.PARTNER, ''
     if booking.user_id == getattr(user, 'pk', None):
-        if booking.booking_status not in wf.REPORT_RELEASED:
-            return False, wf.PATIENT, "Your report is still being processed. You'll be notified when it is ready."
-        if getattr(settings, 'REPORT_REQUIRES_FULL_PAYMENT', False) and booking.payment_status != 'FULLY_PAID':
-            return False, wf.PATIENT, "Please pay the remaining balance to download your report."
-        return True, wf.PATIENT, ''
+        state = patient_report_state(booking)
+        return state['state'] == REPORT_STATE_AVAILABLE, wf.PATIENT, state['message']
     return False, '', "Booking not found."
 
 
@@ -1328,4 +1368,9 @@ def process_balance_payment(booking: Booking, payment_mode='ONLINE', gateway_tra
     how = 'collected by the lab' if recorded_by_partner else 'received'
     notify(locked.user, 'PAYMENT_RESULT', 'Payment received · booking fully paid',
            f"Payment of ₹{due} {how} for booking {locked.booking_id}. Nothing more is due.", booking=locked)
+    if locked.report_file and locked.booking_status in wf.REPORT_RELEASED:
+        # The report was waiting on this payment — tell the patient it's open now.
+        notify(locked.user, 'REPORT_READY', 'Your report is unlocked',
+               f"Thanks for your payment. Your report for booking {locked.booking_id} is now available to view and download.",
+               booking=locked, push=True)
     return payment, None

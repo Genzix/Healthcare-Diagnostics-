@@ -196,6 +196,10 @@ MAILERS = {
     },
 }
 
+# Patients can view / download reports and results only once the booking is fully paid.
+# Partners and admins are never blocked. Keep this on in production.
+REPORT_REQUIRES_FULL_PAYMENT = os.getenv('REPORT_REQUIRES_FULL_PAYMENT', 'True').strip().lower() in ('1', 'true', 'yes')
+
 # Django REST Framework Settings
 REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': [

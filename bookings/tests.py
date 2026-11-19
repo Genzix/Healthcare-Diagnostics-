@@ -516,6 +516,14 @@ class LabReportPipelineTests(TestCase):
     def status_url(self, booking):
         return f'/api/partner/bookings/{booking.booking_id}/update-status/'
 
+    def paid_released_booking(self):
+        """A released report on a fully paid booking — the only case a patient may open it."""
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        _, err = process_balance_payment(booking)
+        self.assertIsNone(err)
+        booking.refresh_from_db()
+        return booking
+
     # ── state machine ──
 
     def test_full_pipeline_records_every_step_in_order(self):
@@ -655,7 +663,7 @@ class LabReportPipelineTests(TestCase):
         self.assertEqual(booking.report_download_count, 0)  # partner previews are not patient downloads
 
     def test_patient_download_marks_report_downloaded_once(self):
-        booking = self.run_lab_pipeline(self.confirmed_booking())
+        booking = self.paid_released_booking()
         self.client.force_authenticate(self.user)
         for _ in range(2):
             res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/')
@@ -668,7 +676,7 @@ class LabReportPipelineTests(TestCase):
         self.assertEqual(booking.status_logs.filter(to_status='REPORT_DOWNLOADED').count(), 1)
 
     def test_download_honours_accept_application_pdf(self):
-        booking = self.run_lab_pipeline(self.confirmed_booking())
+        booking = self.paid_released_booking()
         self.client.force_authenticate(self.user)
         url = f'/api/bookings/{booking.booking_id}/download-report/'
         for accept in ('application/pdf', 'application/pdf, application/json;q=0.9, */*;q=0.8', '*/*'):
@@ -700,13 +708,100 @@ class LabReportPipelineTests(TestCase):
         self.client.force_authenticate(None)
         self.assertIn(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/').status_code, (401, 403))
 
-    @override_settings(REPORT_REQUIRES_FULL_PAYMENT=True)
-    def test_optional_payment_gate_on_download(self):
+    # ── payment gate: no full payment, no report / results ──
+
+    def test_unpaid_patient_gets_402_for_file_and_metadata(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        self.assertNotEqual(booking.payment_status, 'FULLY_PAID')
+        self.client.force_authenticate(self.user)
+        url = f'/api/bookings/{booking.booking_id}/download-report/'
+        for suffix in ('', '?inline=1', '?format=json'):
+            res = self.client.get(url + suffix, HTTP_ACCEPT='application/pdf, application/json;q=0.9')
+            self.assertEqual(res.status_code, 402, suffix)
+            self.assertIn('application/json', res['Content-Type'])
+            body = res.json()
+            self.assertEqual(body['code'], 'payment_required')
+            self.assertEqual(Decimal(body['amount_outstanding']), booking.amount_outstanding)
+            self.assertTrue(body['pay_url'].endswith('/pay-balance/'))
+        booking.refresh_from_db()
+        self.assertEqual(booking.report_download_count, 0)
+        self.assertEqual(booking.booking_status, 'REPORT_READY')
+
+    def test_unpaid_booking_payload_hides_results(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        booking.report_notes = 'Haemoglobin 9.1 g/dL (low)'
+        booking.save(update_fields=['report_notes'])
+        self.client.force_authenticate(self.user)
+        detail = self.client.get(f'/api/bookings/{booking.booking_id}/').data['booking']
+        self.assertFalse(detail['has_report'])
+        self.assertTrue(detail['report_locked'])
+        self.assertEqual(detail['report_access']['state'], 'PAYMENT_REQUIRED')
+        self.assertEqual(Decimal(detail['report_access']['amount_due']), booking.amount_outstanding)
+        self.assertIsNone(detail['report_download_url'])
+        self.assertEqual(detail['report_notes'], '')
+        self.assertEqual(detail['report_verified_by_name'], '')
+        for f in ('report_name', 'report_file_size', 'report_file_sha256', 'report_verified_by_registration'):
+            self.assertIsNone(detail[f], f)
+        self.assertTrue(detail['payment_options']['can_pay_outstanding'])
+        # Same rule on both list shapes.
+        row = self.client.get('/api/bookings/').data['bookings'][0]
+        self.assertTrue(row['report_locked'])
+        self.assertEqual(row['report_notes'], '')
+        compact = self.client.get('/api/bookings/?compact=1').data['bookings'][0]
+        self.assertFalse(compact['has_report'])
+        self.assertTrue(compact['report_locked'])
+
+    def test_patient_payment_unlocks_report_and_notifies(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        ready = Notification.objects.get(user=self.user, booking=booking, notification_type='REPORT_READY')
+        self.assertIn('unlock', ready.message)
+        self.client.force_authenticate(self.user)
+        res = self.client.post(f'/api/bookings/{booking.booking_id}/pay-balance/', {'payment_mode': 'UPI'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        detail = res.data['booking']
+        self.assertTrue(detail['has_report'])
+        self.assertFalse(detail['report_locked'])
+        self.assertEqual(detail['report_access']['state'], 'AVAILABLE')
+        self.assertIsNotNone(detail['report_download_url'])
+        self.assertTrue(Notification.objects.filter(user=self.user, booking=booking, title='Your report is unlocked').exists())
+        res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(b''.join(res.streaming_content).startswith(b'%PDF-'))
+
+    def test_offline_payment_recorded_by_partner_unlocks_report(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        self.client.force_authenticate(self.partner_user)
+        res = self.client.post(f'/api/partner/bookings/{booking.booking_id}/record-balance/',
+                               {'payment_mode': 'CASH', 'offline_reference': 'Cash at desk'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.client.force_authenticate(self.user)
+        self.assertEqual(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/').status_code, 200)
+
+    def test_paid_release_notification_has_no_payment_prompt(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking(), until='SAMPLE_COLLECTED')
+        _, err = process_balance_payment(booking)  # paid before the report exists
+        self.assertIsNone(err)
+        for target, extra in (('SAMPLE_RECEIVED', {}), ('LAB_ANALYSIS', {}), ('REPORT_GENERATED', {}),
+                              ('REPORT_UPLOADED', {'report_file': self.pdf()}),
+                              ('REPORT_VERIFIED', {'verified_by_name': 'Dr. Meera Rao'}), ('REPORT_READY', {})):
+            _, err = partner_update_service_status(booking, self.partner_user, target, **extra)
+            self.assertIsNone(err, target)
+        ready = Notification.objects.get(user=self.user, booking=booking, notification_type='REPORT_READY')
+        self.assertNotIn('unlock', ready.message)
+        self.assertFalse(Notification.objects.filter(booking=booking, title='Your report is unlocked').exists())
+
+    def test_partner_and_admin_are_never_blocked_by_patient_payment(self):
+        booking = self.run_lab_pipeline(self.confirmed_booking())
+        self.client.force_authenticate(self.partner_user)
+        self.assertEqual(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/?inline=1').status_code, 200)
+        admin = User.objects.create_user(phone_number='+919000000999', is_staff=True)
+        self.client.force_authenticate(admin)
+        self.assertEqual(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/').status_code, 200)
+
+    @override_settings(REPORT_REQUIRES_FULL_PAYMENT=False)
+    def test_payment_gate_can_be_disabled(self):
         booking = self.run_lab_pipeline(self.confirmed_booking())
         self.client.force_authenticate(self.user)
-        res = self.client.get(f'/api/bookings/{booking.booking_id}/download-report/')
-        self.assertEqual(res.status_code, 403)
-        process_balance_payment(booking)
         self.assertEqual(self.client.get(f'/api/bookings/{booking.booking_id}/download-report/').status_code, 200)
 
     # ── cancellation & payments ──

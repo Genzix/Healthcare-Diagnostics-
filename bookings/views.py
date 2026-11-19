@@ -42,6 +42,7 @@ from .services import (
     upload_report,
     record_report_download,
     report_access,
+    patient_report_state,
     cancel_booking,
     choose_pay_at_collection,
     pay_at_collection_eligibility,
@@ -608,7 +609,8 @@ class BookingReportDownloadView(APIView):
     GET /api/bookings/<id>/download-report/   (alias: /report/)
 
     Streams the laboratory-uploaded PDF to an authorised viewer only:
-      patient → after release (first download moves the booking to REPORT_DOWNLOADED)
+      patient → after release AND full payment (first download moves the booking to REPORT_DOWNLOADED);
+                released-but-unpaid answers 402 {code: payment_required, amount_outstanding, pay_url}
       partner → its own bookings, once uploaded (to verify it)
       admin   → always
     ?format=json returns metadata instead; ?inline=1 opens in the browser instead of downloading.
@@ -618,6 +620,11 @@ class BookingReportDownloadView(APIView):
     """
     permission_classes = [IsAuthenticated]
     renderer_classes = [JSONRenderer, PDFRenderer]
+
+    def perform_content_negotiation(self, request, force=False):
+        # Never 406: e.g. `?format=json` + `Accept: application/pdf` must still get its JSON
+        # (and a 402/403 must reach the client as JSON, not as "Not Acceptable").
+        return super().perform_content_negotiation(request, force=True)
 
     def finalize_response(self, request, response, *args, **kwargs):
         # Anything that is not the file (403/404/410, auth errors, ?format=json)
@@ -637,6 +644,15 @@ class BookingReportDownloadView(APIView):
             # Same answer for "doesn't exist" and "not yours" — don't leak booking IDs.
             return Response({"success": False, "message": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
         if not allowed:
+            state = patient_report_state(booking) if audience == wf.PATIENT else None
+            if state and state['locked']:
+                # 402: the report exists and is released — only payment stands in the way.
+                return Response({
+                    "success": False, "message": state['message'], "code": "payment_required",
+                    "booking_id": booking.booking_id, "booking_status": booking.booking_status,
+                    "payment_status": booking.payment_status, "amount_outstanding": state['amount_due'],
+                    "pay_url": f"/api/bookings/{booking.booking_id}/pay-balance/",
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
             return Response({"success": False, "message": reason, "code": "report_not_available",
                              "booking_status": booking.booking_status}, status=status.HTTP_403_FORBIDDEN)
 
